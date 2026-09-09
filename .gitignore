@@ -1,0 +1,23 @@
+.DS_Store
+.build/
+.freebuff/
+dist/
+.artifacts/
+
+# Python caches.
+__pycache__/
+*.py[cod]
+
+# Local trace and profiler output.
+*.trace
+*.profraw
+*.profdata
+
+# Local credentials and signing material.
+.env
+.env.*
+!.env.example
+*.p12
+*.p8
+*.pem
+*.key

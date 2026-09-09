@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>LibreReverse</string>
+	<key>CFBundleExecutable</key>
+	<string>LibreReverse</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.librereverse</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>LibreReverse</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>local.librereverse.timeline-moment</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>librereverse</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>MacOSX</string>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>12</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>26.0</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>LibreReverse uses your calendar to detect your meetings automatically.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>LibreReverse uses your calendar to detect your meetings automatically.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>LibreReverse requires microphone access in order to capture meeting audio.</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>LibreReverse records the selected on-screen windows into a private local visual timeline.</string>
+</dict>
+</plist>

@@ -1,0 +1,106 @@
+{
+  "architecture": "arm64",
+  "homebrewPrefix": "/opt/homebrew",
+  "minimumMacOS": "26.0",
+  "packages": [
+    {
+      "architecture": "arm64",
+      "bottle": {
+        "filename": "sqlcipher--4.18.0.arm64_tahoe.bottle.tar.gz",
+        "ociManifestDigest": "sha256:cc10e1cbe1893ddc79f2da031d0dd4997e6925a6d24bb399c285947ec88545b7",
+        "sha256": "d2d1915e6c863d4275ab6e652ff92525d680d809fa4bc23ddc8cace90e1e8966",
+        "url": "https://ghcr.io/v2/homebrew/core/sqlcipher/blobs/sha256:d2d1915e6c863d4275ab6e652ff92525d680d809fa4bc23ddc8cace90e1e8966"
+      },
+      "bottleBuildToolchain": {
+        "clt": "26.6.0.0.1781586589",
+        "cpu_family": "dunno",
+        "os": "Macintosh",
+        "os_version": "macOS 26",
+        "preferred_perl": "5.34",
+        "xcode": "26.6"
+      },
+      "bottleRebuild": 0,
+      "installedFiles": {
+        ".brew/sqlcipher.rb": "c993cb3ef5eb4211ed741c97059cf20d3fb6cfe71552afcf0395779832b4ed41",
+        "include/sqlcipher/sqlite3.h": "8a9d1bff44d75174ca6dea3ea9bac50a6104d86facb566647b8bb839375b7b3a",
+        "lib/libsqlcipher.dylib": "877efa8ef1e381aa85f5d18610351bb089ea716c92fa3cfc0a1e4b419bb28a8d",
+        "lib/pkgconfig/sqlcipher.pc": "19203826bfb6a8ea7d3ceb2ddbf4355ba6fa6d1ca0da050816fef008362e4e2f"
+      },
+      "name": "sqlcipher",
+      "packagedLibraries": [
+        {
+          "file": "libsqlcipher.3.53.4.dylib",
+          "sourceSHA256": "877efa8ef1e381aa85f5d18610351bb089ea716c92fa3cfc0a1e4b419bb28a8d"
+        }
+      ],
+      "pouredFromBottle": true,
+      "runtimeDependencies": {
+        "openssl@4": "4.0.1"
+      },
+      "source": {
+        "sha256": "1df02d1b346fa27feaf2da2cb2c0d8209e788248e461ec288718aa5d3e9643e5",
+        "url": "https://github.com/sqlcipher/sqlcipher/archive/refs/tags/v4.18.0.tar.gz"
+      },
+      "version": "4.18.0"
+    },
+    {
+      "architecture": "arm64",
+      "bottle": {
+        "filename": "openssl@4--4.0.1.arm64_tahoe.bottle.1.tar.gz",
+        "ociManifestDigest": "sha256:46ccd9f22fd7f746fc040d6fa6c71071322773310b30c2d9d0e51ab3a4dd2f8a",
+        "sha256": "df1f1b0af55395e4b3527b2c6d94cb2372cdca8f8414a8290e33f5b1c878e371",
+        "url": "https://ghcr.io/v2/homebrew/core/openssl/4/blobs/sha256:df1f1b0af55395e4b3527b2c6d94cb2372cdca8f8414a8290e33f5b1c878e371"
+      },
+      "bottleBuildToolchain": {
+        "clt": "26.4.0.0.1774242506",
+        "cpu_family": "dunno",
+        "os": "Macintosh",
+        "os_version": "macOS 26",
+        "preferred_perl": "5.34",
+        "xcode": "26.4"
+      },
+      "bottleRebuild": 1,
+      "installedFiles": {
+        ".brew/openssl@4.rb": "f28fead2f33a189bc24cd69acd2d0afa469c41c180b7fac32338872aa1234146",
+        "lib/libcrypto.4.dylib": "75b4143b859ce47a4a537371e26b437025fa9c2082832c4aadf7d198bd9a81bd"
+      },
+      "name": "openssl@4",
+      "packagedLibraries": [
+        {
+          "file": "libcrypto.4.dylib",
+          "sourceSHA256": "75b4143b859ce47a4a537371e26b437025fa9c2082832c4aadf7d198bd9a81bd"
+        }
+      ],
+      "pouredFromBottle": true,
+      "runtimeDependencies": {},
+      "source": {
+        "patches": [
+          {
+            "sha256": "636f11a33a39536c1cc69426c73863db2b57be636b5977a4076b0995c342ef30",
+            "url": "https://github.com/openssl/openssl/commit/1e386aab890b52f46641ab18e1a56cabb1b8c47b.patch?full_index=1"
+          },
+          {
+            "sha256": "3508588c5e03ba6d3898512f0e8e3aa1f177e243c026884d6c31020359cae59e",
+            "url": "https://github.com/openssl/openssl/commit/d9f73e36c5fe720b3367e0fc6501683a3f91193a.patch?full_index=1"
+          }
+        ],
+        "sha256": "2db3f3a0d6ea4b59e1f094ace2c8cd536dffb87cdc39084c5afa1e6f7f37dd09",
+        "url": "https://github.com/openssl/openssl/releases/download/openssl-4.0.1/openssl-4.0.1.tar.gz"
+      },
+      "version": "4.0.1"
+    }
+  ],
+  "pkgConfig": {
+    "cflags": "-I/opt/homebrew/Cellar/sqlcipher/4.18.0/include/sqlcipher",
+    "libs": "-L/opt/homebrew/Cellar/sqlcipher/4.18.0/lib -lsqlcipher",
+    "prefix": "/opt/homebrew/Cellar/sqlcipher/4.18.0"
+  },
+  "schemaVersion": 1,
+  "toolchain": {
+    "clang": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
+    "sdkBuild": "25F70",
+    "sdkVersion": "26.5",
+    "swift": "Apple Swift version 6.3.3 (swiftlang-6.3.3.1.3 clang-2100.1.1.101)",
+    "xcode": "Xcode 26.6\nBuild version 17F113"
+  }
+}
