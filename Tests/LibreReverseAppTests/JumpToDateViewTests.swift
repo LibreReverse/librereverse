@@ -57,9 +57,13 @@ final class JumpToDateViewTests: XCTestCase {
         }
         try snapshot(view)
         view.render(state, loadingDays: true, loadingHours: true)
-        XCTAssertTrue(days.allSatisfy { !$0.isEnabled })
-        XCTAssertTrue(hours.allSatisfy { !$0.isEnabled })
-        XCTAssertTrue(dayButton.toolTip?.contains("Checking") == true)
+        XCTAssertEqual(days.filter(\.isEnabled).count, 2, "Known dates stay usable during background refresh")
+        XCTAssertEqual(hours.filter(\.isEnabled).count, 2)
+        XCTAssertFalse(dayButton.toolTip?.contains("Checking") == true)
+        XCTAssertTrue(days.contains { !$0.isEnabled && $0.toolTip?.contains("Checking") == true })
+        chosenDay = nil
+        dayButton.performClick(nil)
+        XCTAssertEqual(chosenDay, day, "Background loading must not block an available day")
     }
 
     func testDSTHourRowsRepresentEveryActualHourAndLabelRepeatedHoursDistinctly() throws {

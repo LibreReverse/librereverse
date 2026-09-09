@@ -400,6 +400,15 @@ final class LibreReverseTimelineWindowController: NSWindowController,
     private lazy var librarySession = LibraryDatabaseSession(
         configuration: libraryDatabase
     )
+    // Calendar reads use only the retained primary catalog and must not queue
+    // behind timeline seeks that may open encrypted historical shards.
+    private lazy var calendarSession = LibraryDatabaseSession(configuration: libraryDatabase)
+    private lazy var calendarAvailability = LibreReverseCalendarAvailability(
+        loader: { [session = calendarSession] periods in
+            try await session.firstRecordingInPeriods(periods)
+        }
+    )
+    private var calendarWarmTask: Task<Void, Never>?
     private let persistedMediaLoader: LibreReversePersistedMediaLoader
     private var shardResolver: LibreReverseShardResolver?
     private let archiveDownloads: LibreReverseArchiveDownloadCoordinator?
@@ -750,11 +759,17 @@ final class LibreReverseTimelineWindowController: NSWindowController,
 
     func closeMutationAdmission() {
       mutationAdmissionClosed = true
+      closeJumpToDatePicker()
+      calendarWarmTask?.cancel()
+      calendarAvailability.invalidate()
       transcriptPresentationViews.forEach { $0.closeMutationAdmission() }
     }
 
     func prepareForPrimaryReplacement() async {
       retainedCompleteTranscriptID = nil
+      closeJumpToDatePicker()
+      calendarWarmTask?.cancel()
+      calendarAvailability.invalidate()
       cancelMeetingTranscriptWork()
       primaryReplacementDepth += 1
       primaryReplacementGeneration &+= 1
@@ -774,6 +789,7 @@ final class LibreReverseTimelineWindowController: NSWindowController,
       playerLeases.removeAll()
       playerLeaseSession.close()
         await librarySession.closeConnection()
+        await calendarSession.closeConnection()
     }
 
     func primaryReplacementDidComplete() async {
@@ -784,6 +800,9 @@ final class LibreReverseTimelineWindowController: NSWindowController,
     // Metadata-only updates refresh presentation without completing another
     // operation's replacement barrier. Recheck after each actor suspension.
     func refreshAfterLibraryMutation() async {
+        calendarWarmTask?.cancel()
+        calendarAvailability.invalidate()
+        if jumpToDatePopover != nil { closeJumpToDatePicker() }
         retainedCompleteTranscriptID = nil
         guard primaryReplacementDepth == 0 else { return }
         let replacementGeneration = primaryReplacementGeneration
@@ -1186,6 +1205,7 @@ final class LibreReverseTimelineWindowController: NSWindowController,
             startAtLiveEdge ? .blankSearch : .preserveLastSearch
         )
         searchOverlay.focusSearchField()
+        warmJumpAvailability(at: currentSeekDate ?? Date())
         reload(
             startAtLiveEdge: isAtLiveEdge,
             forwardingGlobalScrollEvent: event
@@ -1603,6 +1623,9 @@ final class LibreReverseTimelineWindowController: NSWindowController,
     }
 
     func dismiss() {
+      closeJumpToDatePicker()
+      calendarWarmTask?.cancel()
+      calendarWarmTask = nil
       LibreReverseScrollToRewindController.timelineDidDismiss()
       endScrollPolicy = TimelineEndScrollPolicy()
       // Dismissal invalidates even an in-flight stationary fetch whose I/O
@@ -5588,7 +5611,8 @@ final class LibreReverseTimelineWindowController: NSWindowController,
             closeJumpToDatePicker()
             return
         }
-        guard let range = loadedGlobalSeekInterval else { return }
+        guard primaryReplacementDepth == 0, !mutationAdmissionClosed,
+              let range = loadedGlobalSeekInterval else { return }
         let selected = currentSeekDate ?? range.end
         var state = JumpToDateState(
             currentSeekPosition: selected,
@@ -5597,6 +5621,7 @@ final class LibreReverseTimelineWindowController: NSWindowController,
         )
         state.togglePicker()
         state.completePickerAnimation()
+        seedJumpAvailability(&state)
         jumpToDateState = state
 
         let picker = LibreReverseJumpToDateView(
@@ -5671,6 +5696,7 @@ final class LibreReverseTimelineWindowController: NSWindowController,
         )
       else { return }
         state.viewMonth(month)
+        seedJumpAvailability(&state)
         jumpToDateState = state
         jumpToDateView?.render(state, loadingDays: true, loadingHours: true)
         loadJumpValidDays()
@@ -5678,6 +5704,7 @@ final class LibreReverseTimelineWindowController: NSWindowController,
 
     private func selectJumpDay(_ date: Date) {
         guard var state = jumpToDateState, state.selectDay(date) else { return }
+        seedJumpAvailability(&state)
         jumpToDateState = state
         jumpToDateView?.render(state, loadingDays: false, loadingHours: true)
         jumpToSelectedPickerDate()
@@ -5707,7 +5734,7 @@ final class LibreReverseTimelineWindowController: NSWindowController,
         jumpValidDaysTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let samples = try await librarySession.firstRecordingInPeriods(periods)
+                let samples = try await calendarAvailability.refresh(periods)
                 guard !Task.isCancelled,
                       var latest = jumpToDateState,
             latest.viewingMonth == viewingMonth
@@ -5731,7 +5758,8 @@ final class LibreReverseTimelineWindowController: NSWindowController,
                 )
                 if !latest.validDays.isEmpty { loadJumpValidHours() }
             } catch {
-                guard !Task.isCancelled, let latest = jumpToDateState else { return }
+                guard !Task.isCancelled, let latest = jumpToDateState,
+                      latest.viewingMonth == viewingMonth else { return }
                 jumpToDateView?.render(latest, loadingDays: false, loadingHours: false)
             }
         }
@@ -5752,7 +5780,7 @@ final class LibreReverseTimelineWindowController: NSWindowController,
         jumpValidHoursTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let samples = try await librarySession.firstRecordingInPeriods(periods)
+                let samples = try await calendarAvailability.refresh(periods)
                 guard !Task.isCancelled,
                       var latest = jumpToDateState,
             latest.calendar.startOfDay(for: latest.selectedDate) == selectedDay
@@ -5763,8 +5791,52 @@ final class LibreReverseTimelineWindowController: NSWindowController,
                 jumpToDateState = latest
                 jumpToDateView?.render(latest, loadingDays: false, loadingHours: false)
             } catch {
-                guard !Task.isCancelled, let latest = jumpToDateState else { return }
+                guard !Task.isCancelled, let latest = jumpToDateState,
+                      latest.calendar.startOfDay(for: latest.selectedDate) == selectedDay else { return }
                 jumpToDateView?.render(latest, loadingDays: false, loadingHours: false)
+            }
+        }
+    }
+
+    /// Render proven dates immediately; unknown dates remain unavailable until
+    /// the catalog request completes. No shard reads occur on the opening path.
+    private func seedJumpAvailability(_ state: inout JumpToDateState) {
+        if let month = state.monthInterval() {
+            let periods = jumpAvailabilityPeriods(in: month, component: .day, calendar: state.calendar)
+            let cached = calendarAvailability.cached(periods) ?? []
+            let visible = loadedRawSegments.map(\.startDate).filter { $0 >= month.start && $0 < month.end }
+            state.updateValidDays(cached + visible)
+        }
+        if let day = state.selectedDayInterval() {
+            let periods = jumpAvailabilityPeriods(in: day, component: .hour, calendar: state.calendar)
+            let cached = calendarAvailability.cached(periods) ?? []
+            let visible = loadedRawSegments.map(\.startDate).filter { $0 >= day.start && $0 < day.end }
+            state.updateValidHours(cached + visible)
+        }
+    }
+
+    /// Warm only the viewed month/day and its preceding month, never the whole
+    /// history. Opening the picker and rendering its known dates do not await it.
+    private func warmJumpAvailability(at date: Date) {
+        guard primaryReplacementDepth == 0, !mutationAdmissionClosed else { return }
+        calendarWarmTask?.cancel()
+        let calendar = Calendar.current
+        guard let month = calendar.dateInterval(of: .month, for: date),
+              let day = calendar.dateInterval(of: .day, for: date) else { return }
+        var batches = [
+            jumpAvailabilityPeriods(in: month, component: .day, calendar: calendar),
+            jumpAvailabilityPeriods(in: day, component: .hour, calendar: calendar)
+        ]
+        if let previous = calendar.date(byAdding: .month, value: -1, to: month.start),
+           let interval = calendar.dateInterval(of: .month, for: previous) {
+            batches.append(jumpAvailabilityPeriods(in: interval, component: .day, calendar: calendar))
+        }
+        let availability = calendarAvailability
+        calendarWarmTask = Task {
+            for periods in batches {
+                guard !Task.isCancelled else { return }
+                do { _ = try await availability.load(periods) }
+                catch { return }
             }
         }
     }

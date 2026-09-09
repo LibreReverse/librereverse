@@ -225,7 +225,7 @@ final class LibreReverseJumpToDateView: NSView {
             representedDays[index] = date
             let inMonth = state.calendar.isDate(date, equalTo: month.start, toGranularity: .month)
             let day = state.calendar.startOfDay(for: date)
-            let valid = inMonth && state.validDays.contains(day) && !loadingDays
+            let valid = inMonth && state.validDays.contains(day)
             let selected = inMonth && state.calendar.isDate(date, inSameDayAs: state.selectedDate)
             button.isEnabled = valid
             button.layer?.backgroundColor = selected
@@ -235,8 +235,8 @@ final class LibreReverseJumpToDateView: NSView {
             button.layer?.borderColor = NSColor.systemBlue.withAlphaComponent(0.55).cgColor
             let fullDate = Self.dayFormatter.string(from: date)
             button.setAccessibilityLabel(fullDate)
-            button.toolTip = loadingDays ? "Checking recordings for \(fullDate)"
-                : valid ? fullDate : "No recording on \(fullDate)"
+            button.toolTip = valid ? fullDate : loadingDays
+                ? "Checking recordings for \(fullDate)" : "No recording on \(fullDate)"
             button.contentTintColor = selected
                 ? .white
                 : valid ? .labelColor : .tertiaryLabelColor
@@ -311,7 +311,7 @@ final class LibreReverseJumpToDateView: NSView {
             let selected = date.map {
                 state.calendar.isDate($0, equalTo: state.selectedDate, toGranularity: .hour)
             } ?? false
-            button.isEnabled = valid && !loadingHours
+            button.isEnabled = valid
             button.contentTintColor = valid ? .labelColor : .tertiaryLabelColor
             button.layer?.backgroundColor = valid
                 ? (selected
@@ -320,7 +320,7 @@ final class LibreReverseJumpToDateView: NSView {
                 : NSColor.clear.cgColor
             button.layer?.borderWidth = valid && selected ? 1 : 0
             button.layer?.borderColor = NSColor.systemBlue.withAlphaComponent(0.55).cgColor
-            let availability = loadingHours ? "loading recordings" : valid ? "recording available" : "no recording"
+            let availability = valid ? "recording available" : loadingHours ? "loading recordings" : "no recording"
             button.setAccessibilityLabel("\(button.title), \(availability)")
         }
     }

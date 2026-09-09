@@ -829,6 +829,58 @@ final class LibraryDatabaseSessionTests: XCTestCase {
         await session.closeConnection()
     }
 
+    func testCalendarPeriodLookupSeeksFirstRowInsteadOfScanningEverySegment() async throws {
+        try execute("""
+            WITH RECURSIVE entries(n) AS (
+                SELECT 0 UNION ALL SELECT n+1 FROM entries WHERE n<29999
+            )
+            INSERT INTO segment(bundleID,startDate,endDate,type)
+            SELECT 'com.example.Editor',
+                   strftime('%Y-%m-%dT%H:%M:%f','2028-01-01','+' || n || ' minutes'),
+                   strftime('%Y-%m-%dT%H:%M:%f','2028-01-01','+' || n || ' minutes'),0
+              FROM entries;
+            """)
+        let session = LibraryDatabaseSession(configuration: configuration)
+        let database = try await session.connect()
+        let metrics = CalendarQueryMetrics()
+        sqlite3_trace_v2(database, UInt32(SQLITE_TRACE_PROFILE), { _, context, statement, _ in
+            guard let context, let statement else { return 0 }
+            let metrics = Unmanaged<CalendarQueryMetrics>.fromOpaque(context).takeUnretainedValue()
+            metrics.steps = max(metrics.steps,
+                Int(sqlite3_stmt_status(OpaquePointer(statement), SQLITE_STMTSTATUS_VM_STEP, 0)))
+            return 0
+        }, Unmanaged.passUnretained(metrics).toOpaque())
+        let start = try date("2028-01-01T00:00:00.000")
+        let periods = (0..<31).map { day in
+            DateInterval(start: start.addingTimeInterval(Double(day) * 86400), duration: 86400)
+        }
+        do {
+            let samples = try await session.firstRecordingInPeriods(periods)
+            XCTAssertEqual(samples, (0..<21).map { start.addingTimeInterval(Double($0) * 86400) })
+            XCTAssertLessThan(metrics.steps, 5000,
+                "A month lookup should do bounded index seeks, not visit all30,000 captured segments")
+        } catch {
+            sqlite3_trace_v2(database, 0, nil, nil)
+            await session.closeConnection()
+            throw error
+        }
+        sqlite3_trace_v2(database, 0, nil, nil)
+        await session.closeConnection()
+    }
+
+    func testCalendarPeriodLookupPreservesDuplicateStartsEmptyAndHalfOpenPeriods() async throws {
+        let start = try date("2026-08-22T12:00:00.000")
+        let session = LibraryDatabaseSession(configuration: configuration)
+        let samples = try await session.firstRecordingInPeriods([
+            DateInterval(start: start, duration: 0),
+            DateInterval(start: start, duration: 3600),
+            DateInterval(start: start, duration: 7200),
+            DateInterval(start: start.addingTimeInterval(-3600), duration: 3600),
+        ])
+        XCTAssertEqual(samples, [start])
+        await session.closeConnection()
+    }
+
     func testRecentWindowRetainsWholeThresholdPageAndUsesDescendingIDTieOrder() async throws {
         let tiedDate = "2027-01-01T00:00:00.000"
         let endDate = "2027-01-01T00:00:02.000"
@@ -992,5 +1044,9 @@ final class LibraryDatabaseSessionTests: XCTestCase {
         formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSS"
         return formatter
     }()
+}
+private final class CalendarQueryMetrics: @unchecked Sendable {
+    // Installed on a dedicated test session; read only after its query returns.
+    var steps = 0
 }
 #endif

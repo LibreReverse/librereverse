@@ -77,7 +77,11 @@ public struct JumpToDateState: Equatable {
         pickerDateRange = range
         currentSeekPosition = Self.clamp(currentSeekPosition, to: range)
         pickerDate = Self.clamp(pickerDate, to: range)
-        viewingMonth = Self.monthStart(containing: pickerDate, calendar: calendar)
+        // Live capture extends the range while an older month is being browsed.
+        // Preserve that browsing position until it falls outside the new range.
+        if pickerOpenState == .closed || monthInterval()?.intersection(with: range) == nil {
+            viewMonth(Self.monthStart(containing: pickerDate, calendar: calendar))
+        }
     }
 
     public mutating func viewMonth(_ date: Date) {

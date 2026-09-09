@@ -1971,19 +1971,28 @@ public actor LibraryDatabaseSession {
     /// Returns the first recorded segment within each requested period.
     /// Callers construct periods using their local calendar to preserve
     /// midnight and hour boundaries across daylight-saving transitions.
+    /// Each period seeks the first startDate index entry rather than grouping
+    /// every captured segment in the month. Grouping these bounded samples
+    /// preserves the existing duplicate-start behavior and omits empty periods.
     public func firstRecordingInPeriods(_ periods: [DateInterval]) throws -> [Date] {
         guard !periods.isEmpty else { return [] }
         let database = try connect()
         let values = Array(repeating: "(?, ?)", count: periods.count)
             .joined(separator: ", ")
         let sql = """
-            WITH periods(current, next) AS (VALUES \(values))
-            SELECT MIN(segment.startDate)
-              FROM periods
-              JOIN segment ON segment.startDate >= periods.current
-                          AND segment.startDate < periods.next
-             GROUP BY periods.current
-             ORDER BY periods.current
+            WITH periods(current, next) AS (VALUES \(values)),
+            samples(current, first) AS (
+                SELECT periods.current,
+                       (SELECT segment.startDate FROM segment
+                         WHERE segment.startDate >= periods.current
+                           AND segment.startDate < periods.next
+                         ORDER BY segment.startDate LIMIT 1)
+                  FROM periods
+            )
+            SELECT MIN(first) FROM samples
+             GROUP BY current
+            HAVING MIN(first) IS NOT NULL
+             ORDER BY current
             """
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,

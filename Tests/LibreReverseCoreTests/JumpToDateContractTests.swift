@@ -129,4 +129,20 @@ final class JumpToDateContractTests: XCTestCase {
         XCTAssertTrue(state.validHours.isEmpty)
         XCTAssertFalse(state.isTimePickerEnabled)
     }
+    func testLiveRangeExtensionPreservesTheOlderMonthBeingBrowsed() throws {
+        let start = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 7, day: 1)))
+        let selected = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 9, day: 9)))
+        let august = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 1)))
+        var state = JumpToDateState(currentSeekPosition: selected,
+            pickerDateRange: DateInterval(start: start, end: selected), calendar: calendar)
+        state.togglePicker()
+        state.completePickerAnimation()
+        state.viewMonth(august)
+        state.updateValidDays([august])
+        state.updateRange(DateInterval(start: start, end: selected.addingTimeInterval(60)))
+        XCTAssertEqual(state.viewingMonth, august)
+        XCTAssertEqual(state.validDays, [august])
+        XCTAssertEqual(state.selectedDate, selected)
+    }
+
 }
