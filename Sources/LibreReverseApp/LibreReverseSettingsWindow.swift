@@ -322,7 +322,7 @@ final class LibreReverseSettingsWindowController: NSWindowController {
             apiKey: askAPIKey,
             updateAPIKey: updateAskAPIKey
         )
-        let window = NSWindow(
+        let window = LibreReverseSettingsEditingWindow(
             contentRect: NSRect(x: 0, y: 0, width: 760, height: 820),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
@@ -951,7 +951,7 @@ final class LibreReverseAISettingsViewController: NSViewController, NSTextFieldD
     private let fallbacks = NSButton(checkboxWithTitle: "Allow other providers if preferred providers are unavailable", target: nil, action: nil)
     private let fullTranscripts = NSButton(checkboxWithTitle: "Use full meeting transcripts in Ask", target: nil, action: nil)
     private let fullTranscriptDetail = NSTextField(wrappingLabelWithString:
-        "When enabled, Ask can send the full redacted text of relevant meetings to this cloud profile. Save profile to apply. Changing the model, provider, or routing clears this permission.")
+        "When enabled, Ask can send the full redacted text of relevant meetings to this cloud profile. Save to apply. Changing the model, provider, or routing clears this permission.")
     private var authorizedRoute: String?
     private let defaults: UserDefaults
     private var profiles: [LibreReverseAIProfile]
@@ -961,7 +961,7 @@ final class LibreReverseAISettingsViewController: NSViewController, NSTextFieldD
     private let keyControls = NSStackView()
     private let keyField = NSSecureTextField(frame: .zero)
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
-    private let saveButton = NSButton(title: "Save API key", target: nil, action: nil)
+    private let saveButton = NSButton(title: "Save", target: nil, action: nil)
     private let removeButton = NSButton(title: "Remove key", target: nil, action: nil)
 
     init(
@@ -1015,7 +1015,7 @@ final class LibreReverseAISettingsViewController: NSViewController, NSTextFieldD
         removeButton.target = self
         removeButton.action = #selector(remove)
         let controls = keyControls
-        [settingsFieldContainer(keyField), saveButton, removeButton].forEach { controls.addArrangedSubview($0) }
+        [settingsFieldContainer(keyField), removeButton].forEach { controls.addArrangedSubview($0) }
         controls.orientation = .horizontal
         controls.spacing = 10
 
@@ -1051,7 +1051,7 @@ final class LibreReverseAISettingsViewController: NSViewController, NSTextFieldD
         fullTranscriptDetail.font = .systemFont(ofSize: 12)
         fullTranscriptDetail.textColor = .secondaryLabelColor
         let add = NSButton(title: "Add profile", target: self, action: #selector(addProfile))
-        let saveProfileButton = NSButton(title: "Save profile", target: self, action: #selector(saveProfile))
+        saveButton.setAccessibilityIdentifier("settings.ai.save")
         let delete = NSButton(title: "Remove profile", target: self, action: #selector(removeProfile))
         let profileRow = NSStackView(views: [profilePopup, add, delete])
         profileRow.spacing = 8
@@ -1072,7 +1072,7 @@ final class LibreReverseAISettingsViewController: NSViewController, NSTextFieldD
         providerLabel.widthAnchor.constraint(equalToConstant: 70).isActive = true
         let providerRow = NSStackView(views: [providerLabel, providerPopup])
         providerRow.spacing = 10
-        let form = NSStackView(views: [profileRow, nameRow, providerRow, modelRow, routingRow, fallbacks, fullTranscripts, fullTranscriptDetail, saveProfileButton])
+        let form = NSStackView(views: [profileRow, nameRow, providerRow, modelRow, routingRow, fallbacks, fullTranscripts, fullTranscriptDetail])
         form.orientation = .vertical
         form.alignment = .leading
         form.spacing = 8
@@ -1083,7 +1083,7 @@ final class LibreReverseAISettingsViewController: NSViewController, NSTextFieldD
         reloadProfiles()
         let privacyRow = NSStackView(views: [NSTextField(labelWithString: "Privacy and data sharing"), LibreReverseSettingsInfoButton(privacy.stringValue, identifier: "settings.ai.privacy-help")])
         privacyRow.spacing = 8
-        let stack = NSStackView(views: [title, detail, form, controls, statusLabel, privacyRow])
+        let stack = NSStackView(views: [title, detail, form, controls, saveButton, statusLabel, privacyRow])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 14
@@ -1158,6 +1158,7 @@ final class LibreReverseAISettingsViewController: NSViewController, NSTextFieldD
         routingField.superview?.superview?.isHidden = provider != .openRouter
         fallbacks.isHidden = provider != .openRouter
         keyControls.isHidden = local
+        keyField.isEnabled = !local
         fullTranscripts.isHidden = local
         fullTranscriptDetail.isHidden = local
     }
@@ -1177,13 +1178,6 @@ final class LibreReverseAISettingsViewController: NSViewController, NSTextFieldD
         profile.name = "OpenRouter \(profiles.count)"
         profiles.append(profile)
         selectedID = profile.id
-        persistProfiles()
-    }
-
-    @objc private func saveProfile() {
-        guard let index = profiles.firstIndex(where: { $0.id == selectedID }) else { return }
-        guard let profile = editedProfile() else { return }
-        profiles[index] = profile
         persistProfiles()
     }
 
@@ -1207,11 +1201,10 @@ final class LibreReverseAISettingsViewController: NSViewController, NSTextFieldD
         do {
             updateProviderVisibility()
             let local = profiles.first { $0.id == selectedID }?.provider == .local
-            keyField.isEnabled = !local
-            saveButton.isEnabled = !local
+            saveButton.isEnabled = true
             let hasAPIKey = !(try apiKey() ?? "").isEmpty
             statusLabel.stringValue = local ? "Search and summaries use Apple Intelligence on this Mac." : hasAPIKey
-                ? "API key saved. The saved key is hidden."
+                ? "API key saved. Leave the key field blank to keep it."
                 : "No API key saved."
             removeButton.isEnabled = hasAPIKey && !local
         } catch {
@@ -1221,13 +1214,29 @@ final class LibreReverseAISettingsViewController: NSViewController, NSTextFieldD
     }
 
     @objc private func save() {
+        guard let index = profiles.firstIndex(where: { $0.id == selectedID }),
+              let profile = editedProfile() else { return }
+        var updated = profiles
+        updated[index] = profile
         let value = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { NSSound.beep(); return }
+        let previousProfiles = defaults.object(forKey: LibreReverseAIProfiles.profilesKey)
+        let previousSelection = defaults.object(forKey: LibreReverseAIProfiles.selectedKey)
         do {
-            try updateAPIKey(value)
+            // Validate first, then select the edited destination before the credential
+            // callback resolves its account. Restore preferences if the key write fails.
+            try LibreReverseAIProfiles.save(updated, selected: selectedID, defaults: defaults)
+            do {
+                if profile.provider != .local && !value.isEmpty { try updateAPIKey(value) }
+            } catch {
+                defaults.set(previousProfiles, forKey: LibreReverseAIProfiles.profilesKey)
+                defaults.set(previousSelection, forKey: LibreReverseAIProfiles.selectedKey)
+                throw error
+            }
+            profiles = updated
             keyField.stringValue = ""
             refresh()
-        } catch { statusLabel.stringValue = error.localizedDescription }
+            statusLabel.stringValue = "Saved. " + statusLabel.stringValue
+        } catch { statusLabel.stringValue = "Could not save: " + error.localizedDescription }
     }
 
     @objc private func remove() {
