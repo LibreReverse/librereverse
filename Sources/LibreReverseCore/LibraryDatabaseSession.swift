@@ -1092,14 +1092,16 @@ public actor LibraryDatabaseSession {
     /// projection and composite-library merge used by search.
     public func askEvidenceCandidates(
         in interval: DateInterval,
-        limit: Int = 120
+        limit: Int = 120,
+        transcriptsOnly: Bool = false
     ) throws -> [HistoricalSearchCandidate] {
         guard limit > 0 else { return [] }
         let database = try connect()
         var values = try askEvidenceCandidates(
             database: database,
             interval: interval,
-            limit: limit
+            limit: limit,
+            transcriptsOnly: transcriptsOnly
         )
         if try isSharded(database) {
             for descriptor in try loadShardDescriptors(database)
@@ -1108,13 +1110,16 @@ public actor LibraryDatabaseSession {
                 values.append(contentsOf: try askEvidenceCandidates(
                     database: shard.database,
                     interval: interval,
-                    limit: limit
+                    limit: limit,
+                    transcriptsOnly: transcriptsOnly
                 ))
             }
         }
         var seen: Set<Int64> = []
         return values.sorted {
-            ($0.frameDate ?? .distantPast) > ($1.frameDate ?? .distantPast)
+            let lhs = $0.frameDate ?? .distantPast
+            let rhs = $1.frameDate ?? .distantPast
+            return lhs == rhs ? $0.docID > $1.docID : lhs > rhs
         }.filter { seen.insert($0.docID).inserted }.prefix(limit).map { $0 }
     }
 
@@ -1432,8 +1437,19 @@ public actor LibraryDatabaseSession {
     private func askEvidenceCandidates(
         database: OpaquePointer,
         interval: DateInterval,
-        limit: Int
+        limit: Int,
+        transcriptsOnly: Bool
     ) throws -> [HistoricalSearchCandidate] {
+        // Apply document kind and interval coverage before each store's limit.
+        // A full meeting transcript can overlap the day even when it began earlier.
+        let coverage = transcriptsOnly
+            ? "s.type=1 AND ds.frameId IS NULL AND s.endDate > ?1 AND s.startDate < ?2"
+            : """
+              ((s.type=1 AND ds.frameId IS NULL AND s.endDate > ?1 AND s.startDate < ?2)
+               OR ((s.type!=1 OR ds.frameId IS NOT NULL)
+                   AND COALESCE(f.createdAt,s.startDate) >= ?1
+                   AND COALESCE(f.createdAt,s.startDate) < ?2))
+              """
         let sql = """
         SELECT f.id,COALESCE(f.createdAt,s.startDate),f.isStarred,s.id,s.bundleID,s.windowName,
                s.browserUrl,s.type,sr.text,sr.otherText,sr.rowid
@@ -1441,10 +1457,9 @@ public actor LibraryDatabaseSession {
           JOIN doc_segment ds ON s.id=ds.segmentId
           JOIN searchRanking sr ON sr.rowid=ds.docid
           LEFT JOIN frame f ON f.id=ds.frameId
-         WHERE COALESCE(f.createdAt,s.startDate) >= ?
-           AND COALESCE(f.createdAt,s.startDate) < ?
+         WHERE \(coverage)
          ORDER BY COALESCE(f.createdAt,s.startDate) DESC,sr.rowid DESC
-         LIMIT ?
+         LIMIT ?3
         """
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,

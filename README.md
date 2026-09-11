@@ -87,3 +87,5 @@ See [ARCHITECTURE](ARCHITECTURE.md), [CONTRIBUTING](CONTRIBUTING.md),
 See [Cloud archive storage](docs/ARCHIVE_STORAGE.md) for provider setup and switching.
 
 See [features and settings](docs/FEATURES.md) and the [UI review checklist](docs/UI_CHECKLIST.md) when changing app surfaces.
+
+See [Ask retrieval and context](docs/AI_RETRIEVAL.md) for transcript access, context handling, and the AI improvement roadmap.

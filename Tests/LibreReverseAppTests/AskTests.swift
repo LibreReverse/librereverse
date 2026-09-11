@@ -1,5 +1,6 @@
 #if os(macOS)
 import XCTest
+import CSQLCipher
 import LibreReverseCore
 @testable import LibreReverseApp
 
@@ -67,6 +68,52 @@ final class AskTests: XCTestCase {
         }
     }
 
+    func testAskReadsFullTranscriptOnceAndKeepsReferencePreviewShort() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let configuration = LibreReverseLibraryConfiguration(databaseURL: root.appendingPathComponent("library.sqlite3"),
+            keyFileURL: root.appendingPathComponent("key"), mediaRoot: root.appendingPathComponent("Media"))
+        try LibreReverseLibraryStore.initialize(configuration)
+        let day = try XCTUnwrap(LibreReverseAskQuery.interpret("yesterday").interval)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSS"
+        let start = formatter.string(from: day.start.addingTimeInterval(3600))
+        let end = formatter.string(from: day.start.addingTimeInterval(7200))
+        let body = "Hello. " + String(repeating: "Launch design discussion. ", count: 1900)
+            + "FINAL_QUESTION: explain the reservation invariant. Email tail@example.com."
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(configuration.databaseURL.path, &database), SQLITE_OK)
+        let db = try XCTUnwrap(database)
+        defer { sqlite3_close(db) }
+        let key = try Data(contentsOf: configuration.keyFileURL)
+        XCTAssertEqual(key.withUnsafeBytes { sqlite3_key(db, $0.baseAddress, Int32(key.count)) }, SQLITE_OK)
+        let sql = """
+            INSERT INTO segment(id,bundleID,startDate,endDate,windowName,type)
+              VALUES(9001,'test.meeting','\(start)','\(end)','Design review',1);
+            INSERT INTO searchRanking(rowid,text,otherText,title) VALUES(9001,'\(body)','','Design review');
+            INSERT INTO search(rowid,text,otherText) VALUES(9001,'\(body)','');
+            INSERT INTO searchOffsets(rowid,text,otherText) VALUES(9001,'\(body)','');
+            INSERT INTO doc_segment(docid,segmentId,frameId) VALUES(9001,9001,NULL);
+            """
+        XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK)
+        // First question shares no search terms with the transcript. Second
+        // matches several terms, but must still yield one complete meeting.
+        for question in ["Which questions did the interviewer ask in the meeting yesterday?", "What did launch design decide?"] {
+            let engine = LibreReverseAskEngine(configuration: configuration, provider: AuditEvidenceEchoProvider())
+            let answer = try await engine.answer(question: question, apiKey: "synthetic")
+            XCTAssertEqual(answer.citations.count, 1)
+            XCTAssertTrue(answer.text.contains("FINAL_QUESTION"), "The answer is beyond the old420-character cut")
+            XCTAssertFalse(answer.text.contains("tail@example.com"), "Redaction must cover the full transcript")
+            XCTAssertLessThanOrEqual(answer.citations[0].excerpt.count, 420)
+            XCTAssertFalse(answer.citations[0].plainText.contains("FINAL_QUESTION"))
+        }
+        let limited = LibreReverseAskEngine(configuration: configuration, provider: PreviewOnlyEchoProvider())
+        let preview = try await limited.answer(question: "What happened yesterday?", apiKey: "synthetic")
+        XCTAssertFalse(preview.text.contains("FINAL_QUESTION"), "Unconsented providers receive only previews")
+    }
+
     func testRedactorRemovesSensitiveTextBeforeProviderBoundary() {
         let redacted = LibreReverseAskRedactor.redact(
             "Email me@example.com or +1 (415) 555-0123 using sk-secret_token_1234567890"
@@ -106,8 +153,14 @@ final class AskTests: XCTestCase {
     }
 }
 private struct AuditEvidenceEchoProvider: LibreReverseAskAnswerProvider {
+    var allowsFullTranscriptEvidence: Bool { true }
     func answer(question: String, citations: [LibreReverseAskCitation], apiKey: String) async throws -> String {
-        citations.map(\.excerpt).joined(separator: "\n")
+        citations.map { $0.evidence ?? $0.excerpt }.joined(separator: "\n")
+    }
+}
+private struct PreviewOnlyEchoProvider: LibreReverseAskAnswerProvider {
+    func answer(question: String, citations: [LibreReverseAskCitation], apiKey: String) async throws -> String {
+        citations.map { $0.evidence ?? $0.excerpt }.joined(separator: "\n")
     }
 }
 #endif

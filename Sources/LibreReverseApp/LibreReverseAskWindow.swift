@@ -20,8 +20,12 @@ final class LibreReverseAskWindowController: NSWindowController, NSTextFieldDele
     private let answerText = NSTextView(frame: .zero)
     private let answerScroll = NSScrollView(frame: .zero)
     private var answerHeightConstraint: NSLayoutConstraint?
-    private let citationButtons = (0..<3).map { _ in LibreReverseAskCitationButton() }
-    private let moreCitationsLabel = NSTextField(labelWithString: " ")
+    private var citationButtons: [LibreReverseAskCitationButton] = []
+    private let citationScroll = NSScrollView()
+    private let citationList = LibreReverseAskCitationList()
+    private var citationHeightConstraint: NSLayoutConstraint?
+    private var citationsExpanded = false
+    private let moreCitationsButton = NSButton(title: "", target: nil, action: nil)
     private let citationTitle = NSTextField(labelWithString: "Sources")
     private let copyAnswerButton = NSButton(title: "Copy answer", target: nil, action: nil)
     private let copyCitationsButton = NSButton(title: "Copy with citations", target: nil, action: nil)
@@ -322,12 +326,22 @@ final class LibreReverseAskWindowController: NSWindowController, NSTextFieldDele
         answerScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 72).isActive = true
         answerHeightConstraint = answerHeight
 
-        for button in citationButtons {
-            button.heightAnchor.constraint(equalToConstant: 40).isActive = true
-            button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        }
-        moreCitationsLabel.font = .systemFont(ofSize: 11)
-        moreCitationsLabel.textColor = .secondaryLabelColor
+        citationScroll.drawsBackground = false
+        citationScroll.borderType = .noBorder
+        citationScroll.hasVerticalScroller = true
+        citationScroll.autohidesScrollers = true
+        citationScroll.setAccessibilityIdentifier("ask.sources.list")
+        citationScroll.documentView = citationList
+        citationList.autoresizingMask = [.width]
+        citationHeightConstraint = citationScroll.heightAnchor.constraint(equalToConstant: 120)
+        citationHeightConstraint?.isActive = true
+        moreCitationsButton.font = .systemFont(ofSize: 12)
+        moreCitationsButton.isBordered = false
+        moreCitationsButton.alignment = .left
+        moreCitationsButton.contentTintColor = .systemBlue
+        moreCitationsButton.target = self
+        moreCitationsButton.action = #selector(toggleCitations)
+        moreCitationsButton.setAccessibilityIdentifier("ask.sources.toggle")
 
         copyAnswerButton.target = self
         copyAnswerButton.action = #selector(copyAnswer)
@@ -360,11 +374,11 @@ final class LibreReverseAskWindowController: NSWindowController, NSTextFieldDele
         conversation.spacing = 8
         conversation.addArrangedSubview(answerScroll)
         conversation.addArrangedSubview(citationTitle)
-        for button in citationButtons { conversation.addArrangedSubview(button) }
-        conversation.addArrangedSubview(moreCitationsLabel)
-        conversation.setCustomSpacing(24, after: moreCitationsLabel)
+        conversation.addArrangedSubview(citationScroll)
+        conversation.addArrangedSubview(moreCitationsButton)
+        conversation.setCustomSpacing(24, after: moreCitationsButton)
         conversation.addArrangedSubview(actions)
-        for view in [answerScroll, actions, citationTitle] + citationButtons + [moreCitationsLabel] {
+        for view in [answerScroll, actions, citationTitle, citationScroll, moreCitationsButton] {
             view.widthAnchor.constraint(equalTo: conversation.widthAnchor, constant: 0).isActive = true
         }
         conversation.isHidden = true
@@ -393,7 +407,7 @@ final class LibreReverseAskWindowController: NSWindowController, NSTextFieldDele
         profileLabel.stringValue = profile.name + " · AI profile"
         privacy.stringValue = profile.provider == .local
             ? "Answers are generated on this Mac."
-            : "Relevant text is sent to \(profile.name). Your recordings stay on this Mac."
+            : "Relevant text is sent to \(profile.name). Screenshots, video, and audio are not sent to the AI provider."
         disconnectButton.isHidden = profile.provider == .local
         do {
             apiKey = try loadAPIKey() ?? ""
@@ -518,25 +532,19 @@ final class LibreReverseAskWindowController: NSWindowController, NSTextFieldDele
         questionField.font = .systemFont(ofSize: 20, weight: .semibold)
         suggestions.isHidden = true
         answerText.string = answer.text
-        for (index, button) in citationButtons.enumerated() {
-            guard answer.citations.indices.contains(index) else {
-                button.title = ""
-                button.isHidden = true
-                button.onOpen = nil
-                continue
-            }
-            let citation = answer.citations[index]
-            button.isHidden = false
+        citationsExpanded = false
+        for button in citationButtons { button.removeFromSuperview() }
+        citationButtons = answer.citations.enumerated().map { index, citation in
+            let button = LibreReverseAskCitationButton()
             button.configure(citation: citation, index: index + 1)
+            button.identifier = NSUserInterfaceItemIdentifier("ask.source.\(index + 1)")
+            button.setAccessibilityIdentifier("ask.source.\(index + 1)")
+            button.autoresizingMask = [.width]
             button.onOpen = { [weak self] in self?.openMoment(citation.instant) }
+            citationList.addSubview(button)
+            return button
         }
-        citationTitle.isHidden = answer.citations.isEmpty
-        if answer.citations.count > 3 {
-            moreCitationsLabel.stringValue =
-                "+ \(answer.citations.count - 3) more moment\(answer.citations.count == 4 ? "" : "s") included when copied"
-        } else {
-            moreCitationsLabel.stringValue = ""
-        }
+        updateCitationVisibility()
         conversation.isHidden = false
         conversation.layoutSubtreeIfNeeded()
         if let container = answerText.textContainer, let layout = answerText.layoutManager {
@@ -546,6 +554,35 @@ final class LibreReverseAskWindowController: NSWindowController, NSTextFieldDele
         }
         window?.makeFirstResponder(answerText)
     }
+
+    @objc private func toggleCitations() {
+        guard !shuttingDown, citationButtons.count > 3 else { return }
+        citationsExpanded.toggle()
+        updateCitationVisibility()
+    }
+
+    private func updateCitationVisibility() {
+        let count = citationsExpanded ? citationButtons.count : min(3, citationButtons.count)
+        let width = max(1, citationScroll.contentSize.width)
+        citationList.frame = NSRect(x: 0, y: 0, width: width, height: CGFloat(count) * 40)
+        for (index, button) in citationButtons.enumerated() {
+            button.isHidden = index >= count
+            button.frame = NSRect(x: 0, y: CGFloat(index) * 40, width: width, height: 40)
+        }
+        citationHeightConstraint?.constant = CGFloat(min(count, 6)) * 40
+        citationScroll.isHidden = count == 0
+        citationTitle.isHidden = count == 0
+        moreCitationsButton.isHidden = citationButtons.count <= 3
+        moreCitationsButton.title = citationsExpanded
+            ? "Show fewer sources" : "Show all \(citationButtons.count) sources"
+        moreCitationsButton.setAccessibilityValue(citationsExpanded ? "Expanded" : "Collapsed")
+        citationScroll.contentView.scroll(to: .zero)
+        citationScroll.reflectScrolledClipView(citationScroll.contentView)
+    }
+
+    #if DEBUG
+    var fixtureCitationCopyText: String? { answer?.textWithCitations }
+    #endif
 
     @objc private func newQuestion() {
         guard !shuttingDown else { return }
@@ -584,6 +621,10 @@ final class LibreReverseAskWindowController: NSWindowController, NSTextFieldDele
 }
 
 @MainActor
+private final class LibreReverseAskCitationList: NSView {
+    override var isFlipped: Bool { true }
+}
+
 private final class LibreReverseAskCitationButton: NSButton {
     var onOpen: (() -> Void)?
     private var citation: LibreReverseAskCitation?

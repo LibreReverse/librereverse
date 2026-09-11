@@ -31,6 +31,37 @@ final class LibraryDatabaseSessionTests: XCTestCase {
         if let root { try? FileManager.default.removeItem(at: root) }
     }
 
+    func testAskTranscriptEvidenceFiltersBeforeLimitAndUsesMeetingOverlap() async throws {
+        try auditSeedOCRCandidates(count: 100)
+        let fullText = String(repeating: "Complete spoken discussion without question keywords. ", count: 100)
+        try execute("""
+            INSERT INTO segment(id,bundleID,startDate,endDate,windowName,type) VALUES
+              (800,'com.example.Meeting','2026-12-31T23:50:00.000','2027-01-01T00:10:00.000','Overnight',1),
+              (801,'com.example.Meeting','2026-12-31T23:00:00.000','2027-01-01T00:00:00.000','Ends at start',1),
+              (802,'com.example.Meeting','2027-01-02T00:00:00.000','2027-01-02T00:10:00.000','Starts at end',1),
+              (803,'com.example.Meeting','2027-01-01T00:00:00.000','2027-01-01T00:01:00.000','Starts at start',1);
+            INSERT INTO searchRanking(rowid,text,otherText,title) VALUES
+              (-800,'\(fullText)','','Overnight'),(-801,'Excluded','','Ends at start'),
+              (-802,'Excluded','','Starts at end'),(-803,'Full second transcript','','Starts at start');
+            INSERT INTO doc_segment(docid,segmentId,frameId) VALUES
+              (-800,800,NULL),(-801,801,NULL),(-802,802,NULL),(-803,803,NULL);
+            """)
+        let session = LibraryDatabaseSession(configuration: configuration)
+        let interval = DateInterval(start: try date("2027-01-01T00:00:00.000"),
+                                    end: try date("2027-01-02T00:00:00.000"))
+        let evidence = try await session.askEvidenceCandidates(in: interval, limit: 2, transcriptsOnly: true)
+        XCTAssertEqual(evidence.map(\.segmentID), [803, 800])
+        XCTAssertEqual(evidence.last?.text, fullText, "The full transcript must not be replaced by an excerpt")
+        XCTAssertTrue(evidence.allSatisfy { $0.frameID == nil })
+        let mixed = try await session.askEvidenceCandidates(in: interval, limit: 200)
+        XCTAssertEqual(mixed.count, 102)
+        XCTAssertTrue(mixed.contains { $0.segmentID == 800 })
+        XCTAssertFalse(mixed.contains { $0.segmentID == 801 || $0.segmentID == 802 })
+        let empty = try await session.askEvidenceCandidates(in: interval, limit: 0, transcriptsOnly: true)
+        XCTAssertTrue(empty.isEmpty)
+        await session.closeConnection()
+    }
+
     func testAuditOCRPageAdvertisesUnreturnedEligibleResults() async throws {
         try auditSeedOCRCandidates(count: 100)
         let session = LibraryDatabaseSession(configuration: configuration)

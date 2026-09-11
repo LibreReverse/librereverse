@@ -1,5 +1,6 @@
 #if os(macOS)
 import Foundation
+import CryptoKit
 import LibreReverseCore
 
 struct LibreReverseAIProfile: Codable, Equatable, Identifiable, Sendable {
@@ -10,6 +11,17 @@ struct LibreReverseAIProfile: Codable, Equatable, Identifiable, Sendable {
     var model: String
     var preferredProviders: [String] = []
     var allowFallbacks = true
+    // A grant applies to this exact destination and routing configuration.
+    // Optional decoding keeps existing saved profiles ungranted.
+    var fullTranscriptAuthorization: String? = nil
+    var fullTranscriptRouteFingerprint: String {
+        let components = [provider.rawValue, model, ((try? JSONEncoder().encode(preferredProviders)) ?? Data()).base64EncodedString(), String(allowFallbacks)]
+        let data = (try? JSONEncoder().encode(components)) ?? Data()
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+    var hasFullTranscriptAuthorization: Bool {
+        fullTranscriptAuthorization == fullTranscriptRouteFingerprint
+    }
     var credentialAccount: String { id == "openai" && provider == .openAI ? "openai.api-key" : "ai.profile.\(provider.rawValue).\(id).api-key" }
     static let local = Self(id: "local", name: "On this Mac", provider: .local, model: "Apple Intelligence")
     static let openAI = Self(id: "openai", name: "OpenAI", provider: .openAI, model: "gpt-5-mini")
@@ -42,14 +54,15 @@ enum LibreReverseAIProfiles {
 struct LibreReverseOpenRouterProvider: LibreReverseAskAnswerProvider {
     var profile: LibreReverseAIProfile
     var session = URLSession.shared
+    var allowsFullTranscriptEvidence: Bool { profile.hasFullTranscriptAuthorization }
 
-    func request(question: String, citations: [LibreReverseAskCitation], apiKey: String) throws -> URLRequest {
+    func request(question: String, citations: [LibreReverseAskCitation], apiKey: String, maxTokens: Int = 8_192) throws -> URLRequest {
         var request = URLRequest(url: URL(string: "https://openrouter.ai/api/v1/chat/completions")!)
         request.httpMethod = "POST"
         request.timeoutInterval = 120
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let evidence = citations.enumerated().map { "[\($0.offset + 1)] \($0.element.plainText)" }.joined(separator: "\n")
+        let evidence = citations.enumerated().map { "[\($0.offset + 1)] \(allowsFullTranscriptEvidence ? $0.element.providerText : $0.element.plainText)" }.joined(separator: "\n")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": profile.model,
             "messages": [
@@ -58,21 +71,54 @@ struct LibreReverseOpenRouterProvider: LibreReverseAskAnswerProvider {
             ],
             "provider": ["order": profile.preferredProviders, "allow_fallbacks": profile.allowFallbacks,
                          "data_collection": "deny"],
-            "max_tokens": 4096,
+            "max_tokens": maxTokens,
         ])
         return request
     }
 
     func answer(question: String, citations: [LibreReverseAskCitation], apiKey: String) async throws -> String {
-        let (data, response) = try await session.data(for: request(question: question, citations: citations, apiKey: apiKey))
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw LibreReverseAskError.provider("OpenRouter could not complete the request (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)). Check the key, model and routing settings.")
+        for (attempt, tokenLimit) in [8_192, 16_384].enumerated() {
+            try Task.checkCancellation()
+            let (data, response) = try await session.data(for: request(
+                question: question, citations: citations, apiKey: apiKey, maxTokens: tokenLimit))
+            try Task.checkCancellation()
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                throw LibreReverseAskError.provider("OpenRouter could not complete the request (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)). Check the key, model and routing settings.")
+            }
+            guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                throw LibreReverseAskError.invalidResponse
+            }
+            if let error = json["error"], !(error is NSNull) {
+                throw LibreReverseAskError.provider("OpenRouter reported an error instead of a complete answer. Please try again.")
+            }
+            guard let choices = json["choices"] as? [[String: Any]], let choice = choices.first,
+                let finishReason = choice["finish_reason"] as? String else {
+                throw LibreReverseAskError.invalidResponse
+            }
+            if let error = choice["error"], !(error is NSNull) {
+                throw LibreReverseAskError.provider("OpenRouter reported an error instead of a complete answer. Please try again.")
+            }
+            switch finishReason {
+            case "length":
+                // Reasoning can consume the completion budget before the visible
+                // answer finishes. Retry the same request once with more room.
+                if attempt == 0 { continue }
+                throw LibreReverseAskError.provider("The model could not finish its answer within the output limit. Narrow your question or choose another model; the partial answer was not shown.")
+            case "content_filter":
+                throw LibreReverseAskError.provider("The provider filtered this response and did not return a complete answer.")
+            case "error":
+                throw LibreReverseAskError.provider("OpenRouter reported an error instead of a complete answer. Please try again.")
+            case "stop": break
+            default: throw LibreReverseAskError.invalidResponse
+            }
+            guard let message = choice["message"] as? [String: Any],
+                let text = message["content"] as? String,
+                !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw LibreReverseAskError.invalidResponse
+            }
+            return text
         }
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let choices = json["choices"] as? [[String: Any]],
-            let message = choices.first?["message"] as? [String: Any],
-            let text = message["content"] as? String, !text.isEmpty else { throw LibreReverseAskError.invalidResponse }
-        return text
+        throw LibreReverseAskError.invalidResponse
     }
 }
 #endif

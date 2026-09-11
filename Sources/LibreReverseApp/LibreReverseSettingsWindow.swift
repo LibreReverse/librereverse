@@ -942,15 +942,20 @@ private final class LibreReverseMeetingSettingsViewController: NSViewController 
 }
 
 @MainActor
-final class LibreReverseAISettingsViewController: NSViewController {
+final class LibreReverseAISettingsViewController: NSViewController, NSTextFieldDelegate {
     private let profilePopup = NSPopUpButton()
     private let providerPopup = NSPopUpButton()
     private let nameField = NSTextField()
     private let modelField = NSTextField()
     private let routingField = NSTextField()
     private let fallbacks = NSButton(checkboxWithTitle: "Allow other providers if preferred providers are unavailable", target: nil, action: nil)
-    private var profiles = LibreReverseAIProfiles.load()
-    private var selectedID = LibreReverseAIProfiles.selected().id
+    private let fullTranscripts = NSButton(checkboxWithTitle: "Use full meeting transcripts in Ask", target: nil, action: nil)
+    private let fullTranscriptDetail = NSTextField(wrappingLabelWithString:
+        "When enabled, Ask can send the full redacted text of relevant meetings to this cloud profile. Save profile to apply. Changing the model, provider, or routing clears this permission.")
+    private var authorizedRoute: String?
+    private let defaults: UserDefaults
+    private var profiles: [LibreReverseAIProfile]
+    private var selectedID: String
     private let apiKey: () throws -> String?
     private let updateAPIKey: (String?) throws -> Void
     private let keyControls = NSStackView()
@@ -961,8 +966,12 @@ final class LibreReverseAISettingsViewController: NSViewController {
 
     init(
         apiKey: @escaping () throws -> String?,
-        updateAPIKey: @escaping (String?) throws -> Void
+        updateAPIKey: @escaping (String?) throws -> Void,
+        defaults: UserDefaults = .standard
     ) {
+        self.defaults = defaults
+        self.profiles = LibreReverseAIProfiles.load(defaults)
+        self.selectedID = LibreReverseAIProfiles.selected(defaults).id
         self.apiKey = apiKey
         self.updateAPIKey = updateAPIKey
         #if DEBUG
@@ -990,7 +999,7 @@ final class LibreReverseAISettingsViewController: NSViewController {
         detail.maximumNumberOfLines = 3
 
         let privacy = NSTextField(wrappingLabelWithString:
-            "Your key is stored in LibreReverse's encrypted database. Only your question and the relevant, redacted text excerpts are sent when you use Ask. Screenshots, video, and audio remain local. OpenRouter routing excludes providers that collect prompt data. Provider retention policies still apply."
+            "Your key is stored in LibreReverse's encrypted database. Ask sends your question and relevant redacted excerpts. If you enable full meeting transcripts for a cloud profile, Ask can also send the full redacted text of relevant meetings. Screenshots, video, and audio are not sent to the AI provider. OpenRouter routing excludes providers that collect prompt data. Provider retention policies still apply."
         )
         privacy.font = .systemFont(ofSize: 13)
         privacy.textColor = .secondaryLabelColor
@@ -1029,6 +1038,18 @@ final class LibreReverseAISettingsViewController: NSViewController {
         nameField.placeholderString = "Profile name"
         modelField.placeholderString = "Model ID"
         routingField.placeholderString = "Preferred OpenRouter providers, separated by commas (optional)"
+        modelField.delegate = self
+        routingField.delegate = self
+        modelField.setAccessibilityIdentifier("settings.ai.model")
+        routingField.setAccessibilityIdentifier("settings.ai.routing")
+        fallbacks.target = self
+        fallbacks.action = #selector(routeChanged)
+        fallbacks.setAccessibilityIdentifier("settings.ai.fallbacks")
+        fullTranscripts.target = self
+        fullTranscripts.action = #selector(fullTranscriptChanged)
+        fullTranscripts.setAccessibilityIdentifier("settings.ai.full-transcripts")
+        fullTranscriptDetail.font = .systemFont(ofSize: 12)
+        fullTranscriptDetail.textColor = .secondaryLabelColor
         let add = NSButton(title: "Add profile", target: self, action: #selector(addProfile))
         let saveProfileButton = NSButton(title: "Save profile", target: self, action: #selector(saveProfile))
         let delete = NSButton(title: "Remove profile", target: self, action: #selector(removeProfile))
@@ -1051,10 +1072,11 @@ final class LibreReverseAISettingsViewController: NSViewController {
         providerLabel.widthAnchor.constraint(equalToConstant: 70).isActive = true
         let providerRow = NSStackView(views: [providerLabel, providerPopup])
         providerRow.spacing = 10
-        let form = NSStackView(views: [profileRow, nameRow, providerRow, modelRow, routingRow, fallbacks, saveProfileButton])
+        let form = NSStackView(views: [profileRow, nameRow, providerRow, modelRow, routingRow, fallbacks, fullTranscripts, fullTranscriptDetail, saveProfileButton])
         form.orientation = .vertical
         form.alignment = .leading
         form.spacing = 8
+        fullTranscriptDetail.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true
         for row in [nameRow, modelRow, routingRow] {
             row.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true
         }
@@ -1093,11 +1115,42 @@ final class LibreReverseAISettingsViewController: NSViewController {
         routingField.stringValue = profile.preferredProviders.joined(separator: ", ")
         providerPopup.selectItem(withTitle: profile.provider.rawValue)
         fallbacks.state = profile.allowFallbacks ? .on : .off
+        authorizedRoute = profile.hasFullTranscriptAuthorization ? profile.fullTranscriptRouteFingerprint : nil
+        fullTranscripts.state = authorizedRoute == nil ? .off : .on
         keyField.stringValue = ""
         updateProviderVisibility()
     }
 
-    @objc private func providerChanged() { updateProviderVisibility() }
+    @objc private func providerChanged() { routeChanged(); updateProviderVisibility() }
+
+    func controlTextDidChange(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField,
+              field === modelField || field === routingField else { return }
+        routeChanged()
+    }
+
+    @objc private func routeChanged() {
+        authorizedRoute = nil
+        fullTranscripts.state = .off
+    }
+
+    @objc private func fullTranscriptChanged() {
+        authorizedRoute = fullTranscripts.state == .on ? editedProfile()?.fullTranscriptRouteFingerprint : nil
+    }
+
+    private func editedProfile() -> LibreReverseAIProfile? {
+        guard var profile = profiles.first(where: { $0.id == selectedID }) else { return nil }
+        profile.name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        profile.model = modelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        profile.provider = LibreReverseAIProfile.Provider(rawValue: providerPopup.titleOfSelectedItem ?? "") ?? .openRouter
+        profile.preferredProviders = routingField.stringValue.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        profile.allowFallbacks = fallbacks.state == .on
+        // Capture consent at the checkbox action, never for a later changed route.
+        profile.fullTranscriptAuthorization = profile.provider != .local && fullTranscripts.state == .on
+            && authorizedRoute == profile.fullTranscriptRouteFingerprint ? authorizedRoute : nil
+        return profile
+    }
     private func updateProviderVisibility() {
         let provider = LibreReverseAIProfile.Provider(rawValue: providerPopup.titleOfSelectedItem ?? "") ?? .local
         let local = provider == .local
@@ -1105,12 +1158,14 @@ final class LibreReverseAISettingsViewController: NSViewController {
         routingField.superview?.superview?.isHidden = provider != .openRouter
         fallbacks.isHidden = provider != .openRouter
         keyControls.isHidden = local
+        fullTranscripts.isHidden = local
+        fullTranscriptDetail.isHidden = local
     }
 
     @objc private func selectProfile() {
         guard profiles.indices.contains(profilePopup.indexOfSelectedItem) else { return }
         selectedID = profiles[profilePopup.indexOfSelectedItem].id
-        do { try LibreReverseAIProfiles.save(profiles, selected: selectedID) }
+        do { try LibreReverseAIProfiles.save(profiles, selected: selectedID, defaults: defaults) }
         catch { statusLabel.stringValue = error.localizedDescription; return }
         reloadProfiles()
         refresh()
@@ -1127,12 +1182,8 @@ final class LibreReverseAISettingsViewController: NSViewController {
 
     @objc private func saveProfile() {
         guard let index = profiles.firstIndex(where: { $0.id == selectedID }) else { return }
-        profiles[index].name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        profiles[index].model = modelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        profiles[index].provider = LibreReverseAIProfile.Provider(rawValue: providerPopup.titleOfSelectedItem ?? "") ?? .openRouter
-        profiles[index].preferredProviders = routingField.stringValue.split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-        profiles[index].allowFallbacks = fallbacks.state == .on
+        guard let profile = editedProfile() else { return }
+        profiles[index] = profile
         persistProfiles()
     }
 
@@ -1146,7 +1197,7 @@ final class LibreReverseAISettingsViewController: NSViewController {
 
     private func persistProfiles() {
         do {
-            try LibreReverseAIProfiles.save(profiles, selected: selectedID)
+            try LibreReverseAIProfiles.save(profiles, selected: selectedID, defaults: defaults)
             reloadProfiles()
             refresh()
         } catch { statusLabel.stringValue = error.localizedDescription }
