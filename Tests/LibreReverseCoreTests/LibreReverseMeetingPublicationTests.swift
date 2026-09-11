@@ -1600,9 +1600,8 @@ final class LibreReverseMeetingPublicationTests: XCTestCase {
         var timestamps = MeetingCaptureTimestampLedger(frameRate: 30)
         XCTAssertTrue(timestamps.recordVideo(presentationTimeSeconds: 10))
         XCTAssertTrue(timestamps.recordVideo(presentationTimeSeconds: 10 + 1.0 / 30))
-        let manifest = try await LibreReverseMeetingCrashRecovery.recoverManifest(
-            journal: journal, directory: directory,
-            finalizationReason: "recordingCompletionRecovered", capturedDuration: 1.0 / 30,
+        let manifest = try await LibreReverseMeetingCrashRecovery.recoverFinalizingManifest(
+            journal: journal, directory: directory, capturedDuration: 1.0 / 30,
             timestamps: timestamps)
         XCTAssertEqual(manifest.timestamps.video.sampleBufferCount, 2)
         XCTAssertEqual(manifest.schemaVersion, 6)

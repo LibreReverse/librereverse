@@ -144,6 +144,7 @@ public enum WhisperCPPJSONTranscriptDecoder {
     private struct Result: Decodable { let language: String? }
     private struct Segment: Decodable {
         let text: String
+        let offsets: Offsets?
         let tokens: [Token]?
     }
     private struct Token: Decodable {
@@ -203,37 +204,57 @@ public enum WhisperCPPJSONTranscriptDecoder {
             searchLocation = match.location + match.length
         }
 
-        for token in payload.transcription.flatMap({ $0.tokens ?? [] }) {
-            guard let offsets = token.offsets, offsets.from >= 0, offsets.to >= offsets.from else {
-                continue
-            }
-            let trimmed = token.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, !trimmed.hasPrefix("[") else { continue }
-            let beginsWord = token.text.first?.isWhitespace == true
-            if beginsWord {
-                try append(pending)
-                pending = .init(
-                    text: trimmed,
-                    start: Double(offsets.from) / 1_000,
-                    end: Double(offsets.to) / 1_000,
-                    probabilityTotal: token.p ?? 0,
-                    probabilityCount: token.p == nil ? 0 : 1
-                )
-            } else if pending != nil {
-                pending?.text += trimmed
-                pending?.end = Double(offsets.to) / 1_000
-                if let probability = token.p {
-                    pending?.probabilityTotal += probability
-                    pending?.probabilityCount += 1
+        for segment in payload.transcription {
+            // Pending subwords belong to one recognizer segment. A leading
+            // invalid/control token in the next segment must never attach its
+            // suffix to the preceding segment's final word.
+            try append(pending)
+            pending = nil
+            for token in segment.tokens ?? [] {
+                let trimmed = token.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty, !trimmed.hasPrefix("[") else { continue }
+                guard let offsets = token.offsets, offsets.from >= 0 else { continue }
+                let end: Int64
+                if offsets.to >= offsets.from {
+                    end = offsets.to
+                } else if let segmentOffsets = segment.offsets,
+                          segmentOffsets.from >= 0, segmentOffsets.to >= segmentOffsets.from,
+                          offsets.to >= 0,
+                          offsets.from >= segmentOffsets.from, offsets.from <= segmentOffsets.to {
+                    // VAD can map a boundary token's end before its mapped start.
+                    // Preserve recognized text at its valid segment-bounded start,
+                    // using zero duration rather than inventing a negative span.
+                    end = offsets.from
+                } else {
+                    continue
                 }
-            } else {
-                pending = .init(
-                    text: trimmed,
-                    start: Double(offsets.from) / 1_000,
-                    end: Double(offsets.to) / 1_000,
-                    probabilityTotal: token.p ?? 0,
-                    probabilityCount: token.p == nil ? 0 : 1
-                )
+                let beginsWord = token.text.first?.isWhitespace == true
+                if beginsWord {
+                    try append(pending)
+                    pending = .init(
+                        text: trimmed,
+                        start: Double(offsets.from) / 1_000,
+                        end: Double(end) / 1_000,
+                        probabilityTotal: token.p ?? 0,
+                        probabilityCount: token.p == nil ? 0 : 1
+                    )
+                } else if pending != nil {
+                    pending?.text += trimmed
+                    let previousEnd = pending?.end ?? 0
+                    pending?.end = max(previousEnd, Double(end) / 1_000)
+                    if let probability = token.p {
+                        pending?.probabilityTotal += probability
+                        pending?.probabilityCount += 1
+                    }
+                } else {
+                    pending = .init(
+                        text: trimmed,
+                        start: Double(offsets.from) / 1_000,
+                        end: Double(end) / 1_000,
+                        probabilityTotal: token.p ?? 0,
+                        probabilityCount: token.p == nil ? 0 : 1
+                    )
+                }
             }
         }
         try append(pending)

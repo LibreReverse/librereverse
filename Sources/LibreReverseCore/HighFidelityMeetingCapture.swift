@@ -1057,6 +1057,17 @@ public final class HighFidelityMeetingCaptureSession: NSObject, SCStreamOutput,
         if capturedStreamError == nil {
             await nativeRecordingDidFinish?()
             _ = await MeetingSpeechCapture.enhanceIfReady(movie: configuration.outputURL)
+            let compression = try await MeetingVideoCompression.optimizeFinalizedStagingMovie(
+                at: configuration.outputURL
+            )
+            if case .replaced = compression {
+                terminalMediaEvidence = try await HighFidelityMeetingCaptureMediaInspector.inspect(
+                    url: configuration.outputURL,
+                    expectedWidth: captureWidth, expectedHeight: captureHeight,
+                    requiresAudio: configuration.capturesSystemAudio || configuration.capturesMicrophone,
+                    capturedDuration: stateLock.withLock { ledger.video.coveredDurationSeconds }
+                )
+            }
             // Derive once while the finalized movie is still private staging media.
             // Publication hashes must include the embedded waveform; a derived
             // preview failure must not discard an otherwise valid recording.

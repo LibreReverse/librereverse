@@ -11,6 +11,7 @@ struct LibreReverseArchiveSettingsSnapshot {
     let residencyForecast: LibreReverseResidencyForecast
     let shardStatus: LibreReverseShardArchiveStatus
     let hasActiveRecording: Bool
+    var failureSummaries: [LibreReverseArchiveFailureSummary] = []
 }
 
 struct LibreReverseArchiveConnectionSettings {
@@ -1549,9 +1550,10 @@ final class LibreReverseStorageSettingsViewController: NSViewController {
     private let syncStateLabel = NSTextField(labelWithString: "Backup")
     private let syncSummaryLabel = NSTextField(wrappingLabelWithString: "")
     private let syncNoteLabel = NSTextField(wrappingLabelWithString: "")
+    private let syncFailureLabel = NSTextField(wrappingLabelWithString: "")
     private let localRetentionPopup = NSPopUpButton()
     private let retentionRow = NSStackView()
-    private let retryButton = NSButton(title: "Retry Sync", target: nil, action: nil)
+    private let retryButton = NSButton(title: "Retry Backup", target: nil, action: nil)
     private let primaryButton = NSButton(title: "Connect Google Drive", target: nil, action: nil)
     private let disconnectButton = NSButton(title: "Disconnect", target: nil, action: nil)
     private let usageLabel = NSTextField(wrappingLabelWithString: "Calculating local storage…")
@@ -1661,6 +1663,11 @@ final class LibreReverseStorageSettingsViewController: NSViewController {
         syncStateLabel.setAccessibilityIdentifier("storage.sync.state")
         syncSummaryLabel.textColor = .secondaryLabelColor
         syncSummaryLabel.setAccessibilityIdentifier("storage.sync.summary")
+        syncFailureLabel.font = .systemFont(ofSize: 12)
+        syncFailureLabel.textColor = .secondaryLabelColor
+        syncFailureLabel.isSelectable = true
+        syncFailureLabel.setAccessibilityIdentifier("storage.sync.failures")
+        syncFailureLabel.isHidden = true
         syncNoteLabel.textColor = .secondaryLabelColor
         syncNoteLabel.font = .systemFont(ofSize: 12)
         syncNoteLabel.toolTip = "Most recent recording or history file successfully backed up to your archive."
@@ -1758,7 +1765,7 @@ final class LibreReverseStorageSettingsViewController: NSViewController {
         ])
         let backupCard = makeCard(views: [
             backupHeading, syncStateRow, archiveUsageLabel, growthLabel, syncSummaryLabel, syncProgress,
-            syncNoteLabel, retryButton,
+            syncNoteLabel, syncFailureLabel, retryButton,
         ])
         let localCard = makeCard(views: [
             localHeading, usageLabel, retentionRow, projectionLabel,
@@ -1790,7 +1797,7 @@ final class LibreReverseStorageSettingsViewController: NSViewController {
             document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
         ])
 
-        for fullWidthView in [explanationLabel, statusLabel, detailLabel, syncSummaryLabel, syncNoteLabel, usageLabel, archiveUsageLabel, growthLabel, projectionLabel] {
+        for fullWidthView in [explanationLabel, statusLabel, detailLabel, syncSummaryLabel, syncNoteLabel, syncFailureLabel, usageLabel, archiveUsageLabel, growthLabel, projectionLabel] {
             fullWidthView.translatesAutoresizingMaskIntoConstraints = false
             fullWidthView.widthAnchor.constraint(equalTo: page.widthAnchor).isActive = true
         }
@@ -2067,6 +2074,8 @@ final class LibreReverseStorageSettingsViewController: NSViewController {
 
     private func renderArchiveSnapshot(syncPolicyControls: Bool) {
         let archive = latestArchiveSnapshot.flatMap { $0.providerKind == selection.provider && connectionSettings.activeKind == selection.provider ? $0 : nil }
+        syncFailureLabel.isHidden = true
+        syncFailureLabel.stringValue = ""
         syncSummaryLabel.isHidden = archive == nil
         syncProgress.isHidden = true
         syncActivityIndicator.stopAnimation(nil)
@@ -2108,6 +2117,9 @@ final class LibreReverseStorageSettingsViewController: NSViewController {
                 syncActivityIndicator.isHidden = false
                 syncActivityIndicator.startAnimation(nil)
             }
+            syncFailureLabel.stringValue = LibreReverseArchiveFailurePresentation.text(
+                summaries: archive.failureSummaries, totalFailed: failed)
+            syncFailureLabel.isHidden = failed == 0
             retryButton.isHidden = failed == 0
             if failed > 0 {
                 syncStateLabel.stringValue = "Backup needs attention"

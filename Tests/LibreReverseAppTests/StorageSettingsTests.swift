@@ -210,7 +210,9 @@ final class StorageSettingsTests: XCTestCase {
                 residencyForecast: .init(bytesSelectedForRemoval: 0, bytesSafelyEvictable: 0, bytesWaitingForVerification: 0),
                 shardStatus: .init(totalObjects: 2, verifiedObjects: 2, queuedObjects: 0, failedObjects: 0,
                     totalBytes: 20_000_000, verifiedBytes: 20_000_000, activeTransferredBytes: 0,
-                    latestVerifiedAt: Date().addingTimeInterval(-120)), hasActiveRecording: true)
+                    latestVerifiedAt: Date().addingTimeInterval(-120)), hasActiveRecording: true,
+                failureSummaries: scenario == "failed" ? [.init(isHistoryIndex: false, count: 3,
+                    reason: "Synthetic provider error: invalid_grant")] : [])
             suppliedSnapshot = snapshot
             controller.renderConnectedPreview(settings: .init(activeKind: provider,
                 s3Configuration: provider == .s3Compatible ? s3 : nil,
@@ -242,6 +244,11 @@ final class StorageSettingsTests: XCTestCase {
                 XCTAssertEqual(backupState.stringValue, "Backing up existing recordings…")
             } else if scenario == "failed" {
                 XCTAssertEqual(backupState.stringValue, "Backup needs attention")
+                let failure = try XCTUnwrap(views.first { $0.accessibilityIdentifier() == "storage.sync.failures" } as? NSTextField)
+                XCTAssertFalse(failure.isHiddenOrHasHiddenAncestor)
+                XCTAssertTrue(failure.stringValue.contains("3 recording files"))
+                XCTAssertTrue(failure.stringValue.contains("invalid_grant"))
+                XCTAssertTrue(failure.stringValue.contains("New backups may already be working"))
             } else {
                 XCTAssertEqual(backupState.stringValue, "Archive needs reconnecting — recordings stay on this Mac")
             }

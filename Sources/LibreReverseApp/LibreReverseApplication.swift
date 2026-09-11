@@ -2774,7 +2774,7 @@ private final class LibreReverseAppDelegate: NSObject, NSApplicationDelegate, NS
               outputURL: mediaURL,
               manifestURL: manifestURL,
               displayID: CGMainDisplayID(),
-              frameRate: 60,
+              frameRate: MeetingVideoCompression.frameRate,
               capturesSystemAudio: audioSelection.capturesSystemAudio,
               capturesMicrophone: audioSelection.capturesMicrophone,
               microphoneDeviceID: audioSelection.microphoneDeviceID,
@@ -2891,7 +2891,9 @@ private final class LibreReverseAppDelegate: NSObject, NSApplicationDelegate, NS
       timelineWindow?.meetingCaptureIsFinishing()
       defer { meetingNativeRecordingFinished = false }
       var completedForRestart = false
-      var publicationNeedsRecovery = false
+      // Native stop itself can time out before publication begins. Its durable
+      // journal still owns recoverable media, so every failed stop needs replay.
+      var publicationNeedsRecovery = true
       do {
         let manifest = try await session.stop(finalizationReason: reason.rawValue) { [weak self] in
           guard let self, !terminating else { return }
@@ -2906,7 +2908,6 @@ private final class LibreReverseAppDelegate: NSObject, NSApplicationDelegate, NS
             manifest.state
           )
         }
-        publicationNeedsRecovery = true
         guard let publicationXID = productMeetingPublicationXID else {
           throw LibreReverseMeetingCapturePublicationError.missingPublicationXID
         }
@@ -3084,6 +3085,7 @@ private final class LibreReverseAppDelegate: NSObject, NSApplicationDelegate, NS
       encoder.dateEncodingStrategy = .iso8601
       encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
       var recovered = 0
+      var retainedRecoveryFailure = false
       var newestContinuation = pendingRecoveredMeetingContinuation
       let recoveredAt = Date()
       if newestContinuation == nil {
@@ -3111,14 +3113,23 @@ private final class LibreReverseAppDelegate: NSObject, NSApplicationDelegate, NS
               decoded.writerError?.hasPrefix("Meeting recording output did not finish within ") == true,
               decoded.timestamps.terminalValidationIssue(
                 capturesSystemAudio: decoded.capturesSystemAudio,
-                capturesMicrophone: decoded.capturesMicrophone) == nil,
-              let recovered = try? await LibreReverseMeetingCrashRecovery.recoverManifest(
+                capturesMicrophone: decoded.capturesMicrophone) == nil {
+            do {
+              let recovered = try await LibreReverseMeetingCrashRecovery.recoverFinalizingManifest(
                 journal: journal, directory: directory,
-                finalizationReason: "recordingCompletionRecovered",
                 capturedDuration: decoded.timestamps.video.coveredDurationSeconds,
-                timestamps: decoded.timestamps) {
-            manifest = recovered
-            try encoder.encode(recovered).write(to: manifestURL, options: .atomic)
+                timestamps: decoded.timestamps)
+              manifest = recovered
+              try encoder.encode(recovered).write(to: manifestURL, options: .atomic)
+            } catch {
+              if Task.isCancelled { throw CancellationError() }
+              // Exhausted/structurally rejected artifacts stay intact for later
+              // recovery. Do not silently call a failed probe a successful save.
+              retainedRecoveryFailure = true
+              logRecordingEvent("error", operation: "recoverFinalizingMeeting", error: error)
+              meetingSaveWarning = "A previous meeting could not be recovered. Its files are kept locally."
+              continue
+            }
           } else { continue }
           // A prior recovery attempt may already have materialized this
           // manifest before failing to persist the transcript queue job.
@@ -3154,6 +3165,7 @@ private final class LibreReverseAppDelegate: NSObject, NSApplicationDelegate, NS
           if LibreReverseMeetingRecoveryFailureClassifier.disposition(for: error)
             == .reject
           {
+            retainedRecoveryFailure = true
             // Structurally invalid artifacts and semantic queue/XID
             // mismatches remain staged for diagnostics; retrying cannot
             // make them valid. Filesystem/database errors still escape
@@ -3181,6 +3193,10 @@ private final class LibreReverseAppDelegate: NSObject, NSApplicationDelegate, NS
         recovered += 1
       }
       pendingRecoveredMeetingContinuation = newestContinuation
+      if recovered > 0 && !retainedRecoveryFailure {
+        meetingSaveWarning = nil
+        refreshStatusMenu()
+      }
       return recovered
     }
 
@@ -4180,7 +4196,9 @@ private final class LibreReverseAppDelegate: NSObject, NSApplicationDelegate, NS
                                 destinationID: destination.id,
                                 configuration: configuration
                             ),
-                            hasActiveRecording: hasActiveRecording
+                            hasActiveRecording: hasActiveRecording,
+                            failureSummaries: try LibreReverseArchiveStore.failureSummaries(
+                                destinationID: destination.id, configuration: configuration)
                         )
                     }.value
                 },

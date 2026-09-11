@@ -408,8 +408,60 @@ public enum LibreReverseMeetingCrashRecoveryError: Error, Equatable {
 /// bytes, or publish a file merely because it exists. AVFoundation must parse
 /// the duration, declared tracks, dimensions, and at least one compressed
 /// sample from every required media class before a completed manifest is made.
+enum MeetingFinalizationRecoveryRetry {
+    static func isRetryable(_ error: Error) -> Bool {
+        if error is CancellationError || error is LibreReverseMeetingCaptureJournalError { return false }
+        guard let error = error as? LibreReverseMeetingCrashRecoveryError else { return true }
+        switch error {
+        case .missingCheckpoint, .invalidVideoDimensions, .videoDimensionsMismatch, .unsupportedMediaFileType:
+            return false
+        case .missingMedia, .unreadableMedia, .invalidDuration, .missingVideoTrack,
+             .missingAudioTrack, .sampleValidationFailed:
+            return true
+        }
+    }
+
+    static func run<Value>(
+        delays: [TimeInterval] = [2, 4, 8, 16],
+        operation: () async throws -> Value,
+        wait: (TimeInterval) async throws -> Void = { delay in
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        }
+    ) async throws -> Value {
+        for attempt in 0...delays.count {
+            try Task.checkCancellation()
+            do {
+                let value = try await operation()
+                try Task.checkCancellation()
+                return value
+            }
+            catch {
+                guard isRetryable(error), attempt < delays.count else { throw error }
+                try await wait(delays[attempt])
+            }
+        }
+        preconditionFailure("Retry loop must return or throw")
+    }
+}
+
 public enum LibreReverseMeetingCrashRecovery {
     public static let finalizationReason = "processCrashRecovered"
+
+    /// A timed-out native writer can finalize after its stop callback deadline.
+    /// Retry only a bounded number of probes; never delete or relax validation
+    /// of staged media when the writer still cannot produce a valid artifact.
+    public static func recoverFinalizingManifest(
+        journal: LibreReverseMeetingCaptureJournal,
+        directory: URL,
+        capturedDuration: TimeInterval,
+        timestamps: MeetingCaptureTimestampLedger
+    ) async throws -> HighFidelityMeetingCaptureManifest {
+        try await MeetingFinalizationRecoveryRetry.run(operation: {
+            try await recoverManifest(journal: journal, directory: directory,
+                finalizationReason: "recordingCompletionRecovered",
+                capturedDuration: capturedDuration, timestamps: timestamps)
+        })
+    }
 
     public static func recoverManifest(
         journal: LibreReverseMeetingCaptureJournal,
@@ -441,6 +493,7 @@ public enum LibreReverseMeetingCrashRecovery {
                 )
             }
             _ = await MeetingSpeechCapture.enhanceIfReady(movie: mediaURL)
+            _ = try await MeetingVideoCompression.optimizeFinalizedStagingMovie(at: mediaURL)
             let asset = AVURLAsset(url: mediaURL)
             let isReadable = try await asset.load(.isReadable)
             let isPlayable = try await asset.load(.isPlayable)

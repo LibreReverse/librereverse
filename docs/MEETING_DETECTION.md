@@ -42,3 +42,16 @@ window title or active microphone. Existing observation confirmation, ending
 grace, reentry checks, and privacy exclusions continue to govern recording.
 There is deliberately no microphone-only admission for opaque messaging clients:
 a voice note must not become a meeting automatically.
+
+## Saved recording size and recovery
+
+Meeting capture uses 30 fps at the captured window's native resolution. After
+audio processing, a finalized recording is optimized with HEVC before publication
+and cloud backup. The bitrate budget scales with resolution, from 1.5 to 8 Mbps.
+Audio packets are preserved. The original remains in place unless the replacement
+passes media readback and is at least 10% smaller; an optimization failure does
+not discard a playable recording. Older recordings are not rewritten automatically.
+
+If native finalization times out, the app retries recovery of the staging files
+with bounded delays. Files that cannot be recovered stay local for diagnosis.
+Transcription follows publication and can retry independently of the video save.

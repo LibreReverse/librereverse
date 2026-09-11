@@ -688,6 +688,42 @@ final class MeetingTranscriptionTests: XCTestCase {
         XCTAssertEqual(accumulator.finalizedThroughSeconds, 2.0)
     }
 
+    func testVADBoundaryReversedTokenOffsetsPreserveWordsWithinTheirSegment() throws {
+        let json = """
+        {"result":{"language":"en"},"transcription":[
+          {"text":"A plan", "offsets":{"from":0,"to":1000}, "tokens":[
+            {"text":" A","offsets":{"from":0,"to":100}},
+            {"text":" plan","offsets":{"from":100,"to":900}}
+          ]},
+          {"text":" We can't wait", "offsets":{"from":1200,"to":2000}, "tokens":[
+            {"text":" We","offsets":{"from":1200,"to":1000}},
+            {"text":" can","offsets":{"from":1200,"to":1100}},
+            {"text":"'t","offsets":{"from":1200,"to":1210}},
+            {"text":" wait","offsets":{"from":1220,"to":1900}}
+          ]}
+        ]}
+        """
+        let result = try WhisperCPPJSONTranscriptDecoder.decode(Data(json.utf8))
+        XCTAssertEqual(result.words.map(\.text), ["A", "plan", "We", "can't", "wait"])
+        XCTAssertEqual(result.words.map(\.fullTextUTF16Offset), [0, 2, 7, 10, 16])
+        XCTAssertEqual(result.words[2].startSeconds, 1.2)
+        XCTAssertEqual(result.words[2].endSeconds, 1.2)
+        XCTAssertEqual(result.words[3].endSeconds, 1.21)
+        XCTAssertTrue(result.words.allSatisfy { $0.endSeconds >= $0.startSeconds })
+    }
+
+    func testSegmentBoundaryDoesNotJoinAnUnprefixedTokenToThePreviousWord() throws {
+        let json = """
+        {"result":{"language":"en"},"transcription":[
+          {"text":"first ","tokens":[{"text":"first","offsets":{"from":0,"to":100}}]},
+          {"text":"second","tokens":[{"text":"second","offsets":{"from":200,"to":300}}]}
+        ]}
+        """
+        let result = try WhisperCPPJSONTranscriptDecoder.decode(Data(json.utf8))
+        XCTAssertEqual(result.words.map(\.text), ["first", "second"])
+        XCTAssertEqual(result.words.map(\.fullTextUTF16Offset), [0, 6])
+    }
+
     func testMalformedOrUnlocatableWhisperWordsAreRejected() {
         let malformed = """
             {"result":{"language":"en"},"transcription":[{"text":"hello","tokens":[

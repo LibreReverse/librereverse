@@ -168,6 +168,19 @@ public struct LibreReverseArchiveObject: Equatable, Sendable {
     }
 }
 
+/// Bounded local diagnostics for current failed backup objects, grouped by cause.
+public struct LibreReverseArchiveFailureSummary: Equatable, Sendable {
+    public let isHistoryIndex: Bool
+    public let count: Int64
+    public let reason: String
+
+    public init(isHistoryIndex: Bool, count: Int64, reason: String) {
+        self.isHistoryIndex = isHistoryIndex
+        self.count = count
+        self.reason = reason
+    }
+}
+
 public struct LibreReverseArchiveStatus: Equatable, Sendable {
     public let totalObjects: Int64
     public let queuedObjects: Int64
@@ -801,6 +814,40 @@ public enum LibreReverseArchiveStore {
                         remoteIdentifier: optionalString(value, 7),
                         remoteState: try ArchiveRemoteState.decodePersisted(string(value, 8))
                     ))
+            }
+        }
+    }
+
+    public static func failureSummaries(
+        destinationID: Int64,
+        configuration: LibreReverseLibraryConfiguration,
+        limit: Int = 5
+    ) throws -> [LibreReverseArchiveFailureSummary] {
+        try withDatabase(configuration, create: false) { database in
+            var statement: OpaquePointer?
+            try prepare(database, """
+                SELECT kind,COUNT(*),reason FROM (
+                    SELECT 0 AS kind,COALESCE(NULLIF(TRIM(lastError),''),'No failure reason was saved.') AS reason
+                      FROM archive_object WHERE destinationId=? AND remoteState IN ('failed','corrupt')
+                    UNION ALL
+                    SELECT 1 AS kind,COALESCE(NULLIF(TRIM(lastError),''),'No failure reason was saved.') AS reason
+                      FROM shard_archive_object WHERE destinationId=? AND remoteState IN ('failed','corrupt')
+                ) GROUP BY kind,reason ORDER BY COUNT(*) DESC,kind,reason LIMIT ?
+                """, &statement)
+            let value = try unwrap(statement, database)
+            defer { sqlite3_finalize(value) }
+            sqlite3_bind_int64(value, 1, destinationID)
+            sqlite3_bind_int64(value, 2, destinationID)
+            sqlite3_bind_int(value, 3, Int32(min(20, max(1, limit))))
+            var summaries: [LibreReverseArchiveFailureSummary] = []
+            while true {
+                let result = sqlite3_step(value)
+                if result == SQLITE_DONE { return summaries }
+                guard result == SQLITE_ROW else { throw sqliteError(database) }
+                let reason = sqlite3_column_text(value, 2).map { String(cString: $0) }
+                    ?? "No failure reason was saved."
+                summaries.append(.init(isHistoryIndex: sqlite3_column_int(value, 0) != 0,
+                    count: sqlite3_column_int64(value, 1), reason: reason))
             }
         }
     }

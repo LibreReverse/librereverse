@@ -88,3 +88,11 @@ only on an inactive provider becomes available again when you switch back.
 Restore it locally first if you want the new provider to archive it too. Changing
 the endpoint or bucket of an existing provider requires its archived content to
 be local before replacing that destination's remote metadata.
+
+## Backup failures
+
+When backup needs attention, Settings shows grouped counts and the saved reasons
+for failed recording or history-index files. These describe previous attempts;
+a newer successful upload does not automatically retry a terminal failure. Use
+**Retry Backup** after correcting the cause. For an earlier authorization error,
+try that first and reconnect the provider if authorization fails again.

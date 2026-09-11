@@ -686,6 +686,28 @@ final class LibreReverseArchiveStoreTests: XCTestCase {
         )
     }
 
+    func testFailureSummariesGroupCurrentFailuresAndExcludeRecoveredObjects() throws {
+        let (root, configuration) = try makeLibrary()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let destination = try LibreReverseArchiveStore.upsertGoogleDriveDestination(
+            displayName: "Synthetic", remoteRoot: "synthetic-root", configuration: configuration)
+        var ids: [Int64] = []
+        for index in 0..<3 {
+            ids.append(try makeVideo(at: Date(timeIntervalSince1970: 1_700_000_000 + Double(index)),
+                path: "synthetic.mp4", xid: "synthetic-failure-\(index)", bytes: Data([1]), configuration: configuration))
+        }
+        for (index, id) in ids.enumerated() {
+            let state = index == 2 ? "verified" : "failed"
+            try execute("INSERT OR REPLACE INTO archive_object(destinationId,videoId,relativePath,objectKey,byteCount,remoteState,lastError) VALUES(\(destination),\(id),'synthetic','synthetic-\(index)',1,'\(state)','Synthetic invalid_grant')", configuration)
+        }
+        let summaries = try LibreReverseArchiveStore.failureSummaries(destinationID: destination, configuration: configuration)
+        XCTAssertEqual(summaries, [.init(isHistoryIndex: false, count: 2, reason: "Synthetic invalid_grant")])
+        XCTAssertEqual(try LibreReverseArchiveStore.failureSummaries(destinationID: destination + 100, configuration: configuration), [])
+        try execute("UPDATE archive_object SET remoteState='verified' WHERE destinationId=\(destination)", configuration)
+        XCTAssertEqual(try LibreReverseArchiveStore.failureSummaries(destinationID: destination, configuration: configuration), [],
+            "Old error text on recovered objects must disappear from current failure details")
+    }
+
     private func makeVideo(
         at date: Date,
         path _: String,
