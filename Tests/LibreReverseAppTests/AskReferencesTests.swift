@@ -9,7 +9,7 @@ final class AskReferencesTests: XCTestCase {
         _ = NSApplication.shared
         var opened: Date?
         let controller = LibreReverseAskWindowController(answerHandler: { _, _ in .init(text: "", citations: []) },
-            loadAPIKey: { "synthetic" }, saveAPIKey: { _ in }, openMoment: { opened = $0 })
+            loadAPIKey: { "synthetic" }, openAISettings: { }, openMoment: { opened = $0 })
         let citations = (0..<12).map { index in
             LibreReverseAskCitation(instant: Date(timeIntervalSince1970: 1_700_000_000 + Double(index)),
                 title: "Synthetic source \(index + 1)", excerpt: "Synthetic evidence \(index + 1)", source: "Meeting")
@@ -53,7 +53,7 @@ final class AskReferencesTests: XCTestCase {
     func testNewAnswerResetsExpandedStateAndSmallListsNeedNoToggle() throws {
         _ = NSApplication.shared
         let controller = LibreReverseAskWindowController(answerHandler: { _, _ in .init(text: "", citations: []) },
-            loadAPIKey: { "synthetic" }, saveAPIKey: { _ in }, openMoment: { _ in })
+            loadAPIKey: { "synthetic" }, openAISettings: { }, openMoment: { _ in })
         func answer(_ count: Int) -> LibreReverseAskAnswer {
             .init(text: "Synthetic", citations: (0..<count).map {
                 .init(instant: Date(timeIntervalSince1970: Double($0)), title: "Synthetic \($0)", excerpt: "Synthetic", source: "Screen")

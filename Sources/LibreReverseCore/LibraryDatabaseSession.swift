@@ -1086,6 +1086,230 @@ public actor LibraryDatabaseSession {
             .map { $0 }
     }
 
+    /// Ask evidence uses document identity, never Explorer's visual rectangle reduction.
+    /// Constraints are applied in every store before its bounded candidate limit.
+    public func askSearchEvidence(query: String, in interval: DateInterval? = nil,
+        source: AskEvidenceSource = .all, limit: Int = 120) throws -> AskEvidencePage {
+        guard limit > 0, interval?.duration != 0 else {
+            return AskEvidencePage(candidates: [], hasMore: false)
+        }
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty && !trimmed.unicodeScalars.contains(where: CharacterSet.alphanumerics.contains) {
+            return AskEvidencePage(candidates: [], hasMore: false)
+        }
+        let count = min(limit, 1000)
+        let match = SearchQuery.matchExpression(for: query)
+        guard trimmed.isEmpty || match != nil else { return AskEvidencePage(candidates: [], hasMore: false) }
+        let includeMeetings: Bool
+        switch source { case .screenText: includeMeetings = false; default: includeMeetings = true }
+        // Legacy independent stores may reuse numeric IDs; distinct records/text must survive.
+        struct Identity: Hashable {
+            let doc: Int64; let segment: Int64; let frame: Int64?; let text: String
+        }
+        var values: [HistoricalSearchCandidate] = []
+        try askForEachLocalDatabase(in: interval, includeMeetingOverlap: includeMeetings) { database in
+            try Task.checkCancellation()
+            // Merge one bounded store page into the retained global top page.
+            // Never retain full document pages from every shard at once.
+            values += try askDocumentRows(database: database, match: match, interval: interval,
+                source: source, limit: count + 1)
+            values.sort {
+                let lhs = $0.frameDate ?? .distantPast, rhs = $1.frameDate ?? .distantPast
+                if lhs != rhs { return lhs > rhs }
+                if $0.docID != $1.docID { return $0.docID > $1.docID }
+                if $0.segmentID != $1.segmentID { return $0.segmentID > $1.segmentID }
+                return $0.text < $1.text
+            }
+            var seen: Set<Identity> = []
+            values.removeAll { !seen.insert(Identity(doc: $0.docID, segment: $0.segmentID,
+                frame: $0.frameID, text: $0.text)).inserted }
+            if values.count > count + 1 { values.removeSubrange((count + 1)..<values.count) }
+        }
+        return AskEvidencePage(candidates: Array(values.prefix(count)), hasMore: values.count > count)
+    }
+
+    /// Exact document read; callers can constrain the same interval as their original query.
+    public func askReadEvidence(documentID: Int64, segmentID: Int64,
+        in interval: DateInterval? = nil) throws -> HistoricalSearchCandidate? {
+        var found: HistoricalSearchCandidate?
+        try askForEachLocalDatabase(in: interval) { database in
+            try Task.checkCancellation()
+            guard found == nil else { return }
+            if let value = try askDocumentRows(database: database, match: nil, interval: interval,
+                source: .all, limit: 1, documentID: documentID, segmentID: segmentID).first {
+                found = value
+            }
+        }
+        return found
+    }
+
+    /// Compact always-local catalog: listing does not hydrate remote transcripts.
+    public func askListMeetings(in interval: DateInterval? = nil, limit: Int = 40) throws -> AskMeetingPage {
+        guard limit > 0, interval?.duration != 0 else { return AskMeetingPage(meetings: [], hasMore: false) }
+        let count = min(limit, 1000), database = try connect()
+        let sql = """
+            SELECT s.id,s.startDate,s.endDate,COALESCE(NULLIF(e.title,''),s.windowName,'Meeting')
+            FROM segment s LEFT JOIN event e ON e.id=(SELECT MIN(id) FROM event WHERE segmentID=s.id)
+            WHERE s.type=1 \(interval == nil ? "" : "AND s.endDate > ?1 AND s.startDate < ?2")
+            ORDER BY s.startDate DESC,s.id DESC LIMIT ?3
+            """
+        let statement = try askPrepare(database, sql)
+        defer { sqlite3_finalize(statement) }
+        askBind(interval.map { LibraryDatabase.databaseString($0.start) }, to: statement, index: 1)
+        askBind(interval.map { LibraryDatabase.databaseString($0.end) }, to: statement, index: 2)
+        sqlite3_bind_int(statement, 3, Int32(count + 1))
+        var values: [AskMeetingRecord] = []
+        while try askStep(statement, database: database) {
+            guard let start = try LibraryDatabase.optionalDatabaseDate(LibraryDatabase.string(statement, column: 1)),
+                  let end = try LibraryDatabase.optionalDatabaseDate(LibraryDatabase.string(statement, column: 2)) else { continue }
+            values.append(AskMeetingRecord(segmentID: sqlite3_column_int64(statement, 0), documentID: nil, start: start,
+                end: end, title: LibraryDatabase.string(statement, column: 3) ?? "Meeting"))
+        }
+        let selected = Array(values.prefix(count))
+        var documents: [Int64: Int64] = [:]
+        if !selected.isEmpty {
+            let ids = selected.map { String($0.segmentID) }.joined(separator: ",")
+            try askForEachLocalDatabase(in: interval) { store in
+                let row = try askPrepare(store, "SELECT ds.segmentId,MIN(ds.docid) FROM doc_segment ds JOIN searchRanking sr ON sr.rowid=ds.docid WHERE ds.frameId IS NULL AND ds.segmentId IN (\(ids)) GROUP BY ds.segmentId")
+                defer { sqlite3_finalize(row) }
+                while try askStep(row, database: store) {
+                    let id = sqlite3_column_int64(row, 0)
+                    if documents[id] == nil { documents[id] = sqlite3_column_int64(row, 1) }
+                }
+            }
+        }
+        return AskMeetingPage(meetings: selected.map {
+            AskMeetingRecord(segmentID: $0.segmentID, documentID: documents[$0.segmentID],
+                start: $0.start, end: $0.end, title: $0.title)
+        }, hasMore: values.count > count)
+    }
+
+    /// Availability is metadata, not permission to silently fetch archived data.
+    /// A caller supplies its already-owned queue snapshot; errors are never exposed as content.
+    public func askEvidenceCoverage(in interval: DateInterval? = nil,
+        transcriptionJobs: [LibreReverseMeetingTranscriptionJob] = [],
+        limit: Int = 1000) throws -> AskEvidenceCoverage {
+        let unavailable = try unavailableShards().filter {
+            guard let interval else { return true }
+            return $0.interval.end > interval.start && $0.interval.start < interval.end
+        }
+        let catalog = try askListMeetings(in: interval, limit: limit)
+        let indexed = Set(catalog.meetings.filter { $0.documentID != nil }.map(\.segmentID))
+        var jobs: [Int64: LibreReverseMeetingTranscriptionJob] = [:]
+        for job in transcriptionJobs {
+            if jobs[job.segmentID].map({ $0.createdAt <= job.createdAt }) ?? true { jobs[job.segmentID] = job }
+        }
+        let missing = catalog.meetings.filter { !indexed.contains($0.segmentID) }.map { meeting in
+            let status: AskTranscriptAvailability
+            if let job = jobs[meeting.segmentID] {
+                status = job.lastError == nil ? .pending : .failed
+            } else if unavailable.contains(where: { $0.interval.end > meeting.start && $0.interval.start < meeting.end }) {
+                status = .archived
+            } else { status = .missing }
+            return AskMissingTranscript(segmentID: meeting.segmentID, status: status)
+        }
+        return AskEvidenceCoverage(unavailableShards: unavailable, missingTranscripts: missing,
+            hasMoreMeetings: catalog.hasMore)
+    }
+
+    private func askForEachLocalDatabase(in interval: DateInterval? = nil,
+        includeMeetingOverlap: Bool = true, _ visit: (OpaquePointer) throws -> Void) throws {
+        let database = try connect()
+        try visit(database)
+        if try isSharded(database) {
+            var overlappingStarts: [Date] = []
+            if let interval, includeMeetingOverlap {
+                // A meeting can begin in an earlier shard and overlap the requested day.
+                let statement = try askPrepare(database, "SELECT startDate FROM segment WHERE type=1 AND endDate>?1 AND startDate<?2")
+                defer { sqlite3_finalize(statement) }
+                askBind(LibraryDatabase.databaseString(interval.start), to: statement, index: 1)
+                askBind(LibraryDatabase.databaseString(interval.end), to: statement, index: 2)
+                while try askStep(statement, database: database) {
+                    if let start = try LibraryDatabase.optionalDatabaseDate(LibraryDatabase.string(statement, column: 0)) {
+                        overlappingStarts.append(start)
+                    }
+                }
+            }
+            for descriptor in try loadShardDescriptors(database) where descriptor.state == .sealedLocal {
+                if let interval,
+                   !(descriptor.interval.end > interval.start && descriptor.interval.start < interval.end),
+                   !overlappingStarts.contains(where: { descriptor.interval.contains($0) }) { continue }
+                try Task.checkCancellation()
+                // Consume each handle before opening another: the bounded LRU may close older shards.
+                try visit(shardConnection(for: descriptor).database)
+            }
+        }
+    }
+
+    private func askDocumentRows(database: OpaquePointer, match: String?, interval: DateInterval?,
+        source: AskEvidenceSource, limit: Int, documentID: Int64? = nil,
+        segmentID: Int64? = nil) throws -> [HistoricalSearchCandidate] {
+        var predicates = ["1=1"]
+        if match != nil { predicates.append("searchRanking MATCH ?1") }
+        switch source {
+        case .all: break
+        case .screenText: predicates.append("s.type=0 AND ds.frameId IS NOT NULL")
+        case .transcripts: predicates.append("s.type=1 AND ds.frameId IS NULL")
+        }
+        if interval != nil {
+            predicates.append("""
+                ((s.type=1 AND ds.frameId IS NULL AND s.endDate > ?2 AND s.startDate < ?3)
+                 OR ((s.type!=1 OR ds.frameId IS NOT NULL) AND COALESCE(f.createdAt,s.startDate)>=?2
+                     AND COALESCE(f.createdAt,s.startDate)<?3))
+                """)
+        }
+        if documentID != nil { predicates.append("ds.docid=?5") }
+        if segmentID != nil { predicates.append("s.id=?6") }
+        let sql = """
+            SELECT f.id,COALESCE(f.createdAt,s.startDate),f.isStarred,s.id,s.bundleID,s.windowName,
+                   s.browserUrl,s.type,sr.text,sr.otherText,sr.rowid
+            FROM segment s JOIN doc_segment ds ON ds.segmentId=s.id
+            JOIN searchRanking sr ON sr.rowid=ds.docid LEFT JOIN frame f ON f.id=ds.frameId
+            WHERE \(predicates.joined(separator: " AND "))
+            ORDER BY COALESCE(f.createdAt,s.startDate) DESC,sr.rowid DESC,s.id DESC LIMIT ?4
+            """
+        let statement = try askPrepare(database, sql)
+        defer { sqlite3_finalize(statement) }
+        askBind(match, to: statement, index: 1)
+        askBind(interval.map { LibraryDatabase.databaseString($0.start) }, to: statement, index: 2)
+        askBind(interval.map { LibraryDatabase.databaseString($0.end) }, to: statement, index: 3)
+        sqlite3_bind_int(statement, 4, Int32(limit))
+        if let documentID { sqlite3_bind_int64(statement, 5, documentID) }
+        if let segmentID { sqlite3_bind_int64(statement, 6, segmentID) }
+        var result: [HistoricalSearchCandidate] = []
+        while try askStep(statement, database: database) {
+            result.append(HistoricalSearchCandidate(docID: sqlite3_column_int64(statement, 10),
+                frameID: LibraryDatabase.optionalInt64(statement, column: 0), segmentID: sqlite3_column_int64(statement, 3),
+                frameDate: try LibraryDatabase.optionalDatabaseDate(LibraryDatabase.string(statement, column: 1)),
+                isStarred: sqlite3_column_int(statement, 2) != 0,
+                bundleID: LibraryDatabase.string(statement, column: 4), windowName: LibraryDatabase.string(statement, column: 5),
+                browserURL: LibraryDatabase.string(statement, column: 6),
+                segmentType: SegmentType(rawValue: Int(sqlite3_column_int64(statement, 7))) ?? .capturedScreen,
+                text: LibraryDatabase.string(statement, column: 8) ?? "", otherText: LibraryDatabase.string(statement, column: 9) ?? ""))
+        }
+        return result
+    }
+
+    private func askPrepare(_ database: OpaquePointer, _ sql: String) throws -> OpaquePointer {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw LibraryDatabaseError.queryFailed(LibraryDatabase.errorMessage(database))
+        }
+        return statement
+    }
+    private func askBind(_ value: String?, to statement: OpaquePointer, index: Int32) {
+        if let value { sqlite3_bind_text(statement, index, value, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
+        else { sqlite3_bind_null(statement, index) }
+    }
+    private func askStep(_ statement: OpaquePointer, database: OpaquePointer) throws -> Bool {
+        try Task.checkCancellation()
+        switch sqlite3_step(statement) {
+        case SQLITE_ROW: return true
+        case SQLITE_DONE: return false
+        default: throw LibraryDatabaseError.queryFailed(LibraryDatabase.errorMessage(database))
+        }
+    }
+
     /// Bounded local-history excerpts for a time-only Ask request such as
     /// "What did I do yesterday?". This deliberately bypasses FTS because
     /// there is no lexical term, but preserves the same document/segment

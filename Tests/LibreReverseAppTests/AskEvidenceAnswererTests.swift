@@ -20,7 +20,7 @@ private actor EvidenceProviderProbe: LibreReverseAskAnswerProvider {
             let supplied = allowsFullTranscriptEvidence ? citations[0].providerText : citations[0].plainText
             return supplied.contains("TAILMARKER") ? "TAILMARKER [1]" : "Other fact [1]"
         }
-        return "Final [1] [2]"
+        return "Final " + citations.indices.map { "[\($0 + 1)]" }.joined(separator: " ")
     }
 }
 

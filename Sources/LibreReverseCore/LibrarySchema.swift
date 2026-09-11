@@ -2,6 +2,15 @@
 enum LibrarySchema {
     static let schemaSQL = """
     PRAGMA user_version=41;
+    -- Local catalog chats are preserved across primary rollover, not exported
+    -- with recording shards. Payloads contain completed chat turns only.
+    CREATE TABLE IF NOT EXISTS ask_chat(
+      id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=36),
+      title TEXT NOT NULL CHECK(length(title)>0 AND length(CAST(title AS BLOB))<=4096),
+      payload BLOB NOT NULL CHECK(length(payload)>0 AND length(payload)<=2097152),
+      createdAt REAL NOT NULL,updatedAt REAL NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS index_ask_chat_updated ON ask_chat(updatedAt DESC,id);
     CREATE TABLE IF NOT EXISTS segment(
       id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, bundleID TEXT, startDate TEXT NOT NULL,
       endDate TEXT NOT NULL, windowName TEXT, browserUrl TEXT, browserProfile TEXT,

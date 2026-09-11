@@ -25,6 +25,57 @@ final class TimelineInteractionLifecycleTests: XCTestCase {
             "Opening an auxiliary window must not restore the explicitly dismissed timeline")
     }
 
+    func testAIChatIsEmbeddedInMainSearchAndToggleRestoresKeywordSearch() throws {
+        let (controller, root) = makeController()
+        defer { controller.interactionTestTearDown(); try? FileManager.default.removeItem(at: root) }
+        let ask = LibreReverseAskWindowController(answerHandler: { _, _ in .init(text: "Synthetic answer", citations: []) },
+            loadAPIKey: { "synthetic" }, openAISettings: {}, openMoment: { _ in })
+        controller.window?.setContentSize(NSSize(width: 1200, height: 800))
+        controller.presentInlineAsk(ask, query: "What was happening here?")
+        let content = try XCTUnwrap(controller.window?.contentView)
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        content.layoutSubtreeIfNeeded()
+        let composer = try XCTUnwrap(descendants(content).first { $0.accessibilityIdentifier() == "ask.question" } as? NSTextView)
+        XCTAssertEqual(composer.string, "What was happening here?")
+        XCTAssertTrue(composer.window === controller.window)
+        XCTAssertFalse(ask.window?.isVisible == true, "AI search must not open a second window")
+        XCTAssertFalse(composer.isHiddenOrHasHiddenAncestor)
+        let toggle = try XCTUnwrap(descendants(content).first { $0.accessibilityIdentifier() == "search.ai-toggle" } as? NSButton)
+        XCTAssertEqual(toggle.state, .on)
+        let point = composer.convert(NSPoint(x: 5, y: 5), to: nil)
+        XCTAssertFalse(controller.interactionTestShouldScrollTimeline(at: point),
+            "Scrolling the chat must not scrub and dismiss the timeline")
+        for size in [NSSize(width: 1200, height: 800), NSSize(width: 800, height: 700)] {
+            controller.window?.setContentSize(size)
+            content.layoutSubtreeIfNeeded()
+            XCTAssertTrue(content.bounds.contains(composer.convert(composer.bounds, to: content)), "Composer must stay inside the viewer")
+        }
+        controller.window?.makeFirstResponder(composer)
+        toggle.performClick(nil)
+        content.layoutSubtreeIfNeeded()
+        XCTAssertFalse(controller.window?.firstResponder === composer, "Hidden chat must release keyboard focus")
+        XCTAssertEqual(toggle.state, .off)
+        XCTAssertTrue(composer.isHiddenOrHasHiddenAncestor)
+        controller.presentInlineAsk(ask)
+        XCTAssertFalse(composer.isHiddenOrHasHiddenAncestor)
+        XCTAssertEqual(composer.string, "What was happening here?", "Toggling search must preserve the draft")
+        if let path = ProcessInfo.processInfo.environment["LIBREREVERSE_INLINE_ASK_PREVIEW"] {
+            controller.window?.setContentSize(NSSize(width: 1200, height: 900))
+            ask.appendFixture(question: "What were the decisions in this meeting?", answer: .init(
+                text: "**Two decisions** came out of the review. [1]\n\n1. Keep meeting capture local.\n2. Test screen sharing before Friday.",
+                citations: [.init(instant: Date(timeIntervalSince1970: 1_700_000_000), title: "Product review", excerpt: "Keep capture local and test sharing.", source: "Transcript")]))
+            ask.appendFixture(question: "Who is following up?", answer: .init(
+                text: "**Alex** will test sharing. **Morgan** will review the transcript. [1]",
+                citations: [.init(instant: Date(timeIntervalSince1970: 1_700_000_000), title: "Product review", excerpt: "Alex and Morgan own the follow-up.", source: "Transcript")]))
+            content.layoutSubtreeIfNeeded()
+            if let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
+                content.cacheDisplay(in: content.bounds, to: bitmap)
+                try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+            }
+        }
+        _ = ask.beginShutdown()
+    }
+
     func testTranscriptDragMovesCardAndClampsItInsideViewer() {
         let (controller, root) = makeController()
         defer { controller.interactionTestTearDown(); try? FileManager.default.removeItem(at: root) }

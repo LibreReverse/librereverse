@@ -31,6 +31,134 @@ final class LibraryDatabaseSessionTests: XCTestCase {
         if let root { try? FileManager.default.removeItem(at: root) }
     }
 
+    func testAskDateScopeSkipsUnrelatedShardAndPunctuationDoesNotBrowse() async throws {
+        let library = LibreReverseLibraryConfiguration(databaseURL: configuration.databaseURL,
+            keyFileURL: configuration.keyFileURL, mediaRoot: configuration.mediaRoot)
+        try LibreReverseShardStore.initialize(library)
+        let epoch = try LibreReverseShardStore.epochStart(configuration: library)
+        let oldDate = try date("2026-08-22T12:00:00.000")
+        let ordinal = LibreReverseShardInterval.ordinal(containing: oldDate, epochStart: epoch)
+        let oldInterval = LibreReverseShardInterval(ordinal: ordinal, epochStart: epoch)
+        let id = try LibreReverseShardStore.registerBuildingShard(interval: oldInterval,
+            relativePath: "Shards/intentionally-not-resident.sqlite3", configuration: library)
+        try execute("UPDATE shard_metadata SET routingState='sharded'; UPDATE library_shard SET state='sealed_local',frameCount=1 WHERE id=\(id);")
+        let session = LibraryDatabaseSession(configuration: configuration)
+        let later = DateInterval(start: oldInterval.end.addingTimeInterval(60), duration: 3600)
+        let result = try await session.askSearchEvidence(query: "topic", in: later)
+        XCTAssertTrue(result.candidates.isEmpty)
+        let read = try await session.askReadEvidence(documentID: -999, segmentID: 999, in: later)
+        XCTAssertNil(read)
+        let punctuation = try await session.askSearchEvidence(query: "\"\" ... !!!")
+        XCTAssertTrue(punctuation.candidates.isEmpty, "Nonempty punctuation must not become an unscoped browse")
+        // A meeting crossing the boundary still requires its earlier shard.
+        try execute("""
+            INSERT INTO segment(id,bundleID,startDate,endDate,windowName,type)
+            VALUES(800,'test.meeting','\(Self.formatter.string(from: oldInterval.end.addingTimeInterval(-60)))',
+                '\(Self.formatter.string(from: later.end))','Cross boundary',1);
+            """)
+        do {
+            _ = try await session.askSearchEvidence(query: "topic", in: later, source: .transcripts)
+            XCTFail("A transcript query must visit the older overlapping meeting shard")
+        } catch is LibraryDatabaseError { }
+        let screens = try await session.askSearchEvidence(query: "topic", in: later, source: .screenText)
+        XCTAssertTrue(screens.candidates.isEmpty, "Screen-only retrieval needs no older meeting shard")
+        await session.closeConnection()
+    }
+
+    func testAskEvidenceSearchFiltersBeforeCapAndRetainsDistinctEqualRectangles() async throws {
+        try auditSeedOCRCandidates(count: 600)
+        let tail = String(repeating: "Unrelated introduction. ", count: 100) + "auditneedle final decision"
+        try execute("""
+            INSERT INTO searchRanking(rowid,text,otherText,title) VALUES
+              (-1,'\(tail)','','First'),(-2,'auditneedle contrary decision','','Second');
+            INSERT INTO doc_segment(docid,segmentId,frameId) VALUES(-1,1,1),(-2,1,2);
+            INSERT INTO node(frameId,nodeOrder,textOffset,textLength,leftX,topY,width,height,windowIndex)
+            VALUES(1,0,0,11,0,0,0.2,0.05,0),(2,0,0,11,0,0,0.2,0.05,0);
+            """)
+        let interval = DateInterval(start: try date("2026-08-22T00:00:00.000"), end: try date("2026-08-23T00:00:00.000"))
+        let session = LibraryDatabaseSession(configuration: configuration)
+        let page = try await session.askSearchEvidence(query: "auditneedle", in: interval, source: .screenText, limit: 2)
+        XCTAssertEqual(page.candidates.map(\.docID), [-2, -1])
+        XCTAssertFalse(page.hasMore)
+        XCTAssertEqual(page.candidates.last?.text, tail)
+        let limited = try await session.askSearchEvidence(query: "auditneedle", in: interval, source: .screenText, limit: 1)
+        XCTAssertTrue(limited.hasMore)
+        let read = try await session.askReadEvidence(documentID: -1, segmentID: 1, in: interval)
+        XCTAssertEqual(read?.text, tail)
+        let wrongOwner = try await session.askReadEvidence(documentID: -1, segmentID: 2)
+        XCTAssertNil(wrongOwner)
+        let wrongDay = try await session.askReadEvidence(documentID: -1, segmentID: 1,
+            in: DateInterval(start: try date("2027-01-01T00:00:00.000"), duration: 86400))
+        XCTAssertNil(wrongDay)
+        let meetings = try await session.askSearchEvidence(query: "auditneedle", in: interval, source: .transcripts)
+        XCTAssertTrue(meetings.candidates.isEmpty)
+        await session.closeConnection()
+    }
+
+    func testAskCoverageDistinguishesQueuedFailedMissingAndCompletedEmptyTranscript() async throws {
+        try execute("""
+            INSERT INTO segment(id,bundleID,startDate,endDate,windowName,type) VALUES
+              (800,'test.meeting','2026-08-22T10:00:00.000','2026-08-22T10:30:00.000','Queued',1),
+              (801,'test.meeting','2026-08-22T11:00:00.000','2026-08-22T11:30:00.000','Failed',1),
+              (802,'test.meeting','2026-08-22T12:00:00.000','2026-08-22T12:30:00.000','Missing',1),
+              (803,'test.meeting','2026-08-22T13:00:00.000','2026-08-22T13:30:00.000','Silent',1);
+            INSERT INTO searchRanking(rowid,text,otherText,title) VALUES(-803,'','','Silent');
+            INSERT INTO doc_segment(docid,segmentId,frameId) VALUES(-803,803,NULL);
+            """)
+        let jobs: [LibreReverseMeetingTranscriptionJob] = [
+            .init(publicationXID: "queued", segmentID: 800, videoID: 1, title: "Queued", relativeMediaPath: "queued.mp4"),
+            .init(publicationXID: "failed", segmentID: 801, videoID: 2, title: "Failed", relativeMediaPath: "failed.mp4",
+                attempt: 2, retryAfter: Date(), lastError: "Synthetic failure")
+        ]
+        let session = LibraryDatabaseSession(configuration: configuration)
+        let coverage = try await session.askEvidenceCoverage(transcriptionJobs: jobs)
+        XCTAssertTrue(coverage.unavailableShards.isEmpty)
+        XCTAssertFalse(coverage.hasMoreMeetings)
+        let states = Dictionary(uniqueKeysWithValues: coverage.missingTranscripts.map { ($0.segmentID, $0.status) })
+        XCTAssertEqual(states[800], .pending)
+        XCTAssertEqual(states[801], .failed)
+        XCTAssertEqual(states[802], .missing)
+        XCTAssertNil(states[803], "A durable empty completion marker is not a missing transcript")
+        let catalog = try await session.askListMeetings(limit: 2)
+        XCTAssertEqual(catalog.meetings.map(\.segmentID), [803, 802])
+        XCTAssertEqual(catalog.meetings.first?.documentID, -803)
+        XCTAssertNil(catalog.meetings.last?.documentID)
+        XCTAssertTrue(catalog.hasMore)
+        let bounded = try await session.askEvidenceCoverage(transcriptionJobs: jobs, limit: 2)
+        XCTAssertTrue(bounded.hasMoreMeetings)
+        await session.closeConnection()
+    }
+
+    func testAskCoverageReportsRemoteShardWithoutPretendingTranscriptIsAbsent() async throws {
+        let library = LibreReverseLibraryConfiguration(databaseURL: configuration.databaseURL,
+            keyFileURL: configuration.keyFileURL, mediaRoot: configuration.mediaRoot)
+        try LibreReverseShardStore.initialize(library)
+        let epoch = try LibreReverseShardStore.epochStart(configuration: library)
+        let instant = try date("2026-08-22T12:00:00.000")
+        let ordinal = LibreReverseShardInterval.ordinal(containing: instant, epochStart: epoch)
+        let interval = LibreReverseShardInterval(ordinal: ordinal, epochStart: epoch)
+        let shard = try LibreReverseShardStore.registerBuildingShard(interval: interval,
+            relativePath: "Shards/\(interval.fileName)", configuration: library)
+        try execute("""
+            UPDATE shard_metadata SET routingState='sharded';
+            UPDATE library_shard SET state='remote_only',frameCount=1 WHERE id=\(shard);
+            INSERT INTO segment(id,bundleID,startDate,endDate,windowName,type)
+            VALUES(800,'test.meeting','2026-08-22T12:00:00.000','2026-08-22T12:30:00.000','Archived',1);
+            """)
+        let session = LibraryDatabaseSession(configuration: configuration)
+        let requested = DateInterval(start: instant, duration: 3600)
+        let coverage = try await session.askEvidenceCoverage(in: requested)
+        XCTAssertEqual(coverage.unavailableShards.map(\.ordinal), [ordinal])
+        XCTAssertEqual(coverage.missingTranscripts.first?.status, .archived)
+        let catalog = try await session.askListMeetings(in: requested)
+        XCTAssertEqual(catalog.meetings.map(\.segmentID), [800])
+        XCTAssertNil(catalog.meetings.first?.documentID)
+        let outside = try await session.askEvidenceCoverage(in: DateInterval(start: interval.end, duration: 3600))
+        XCTAssertTrue(outside.unavailableShards.isEmpty)
+        XCTAssertTrue(outside.missingTranscripts.isEmpty)
+        await session.closeConnection()
+    }
+
     func testAskTranscriptEvidenceFiltersBeforeLimitAndUsesMeetingOverlap() async throws {
         try auditSeedOCRCandidates(count: 100)
         let fullText = String(repeating: "Complete spoken discussion without question keywords. ", count: 100)
@@ -613,6 +741,14 @@ final class LibraryDatabaseSessionTests: XCTestCase {
         let search = try await session.recencySearchCandidates(query: "google")
         XCTAssertEqual(search.map(\.docID), [99, 41, 40])
         XCTAssertEqual(search.map(\.frameID), [99, 2, 1])
+        let ask = try await session.askSearchEvidence(query: "google", source: .screenText, limit: 2)
+        XCTAssertEqual(ask.candidates.map(\.docID), [99, 41])
+        XCTAssertTrue(ask.hasMore)
+        let historicalAsk = try await session.askSearchEvidence(query: "google",
+            in: DateInterval(start: interval.start, end: interval.end), source: .screenText)
+        XCTAssertEqual(historicalAsk.candidates.map(\.docID), [41, 40])
+        let archivedRead = try await session.askReadEvidence(documentID: 40, segmentID: 1)
+        XCTAssertEqual(archivedRead?.text, "google historical one")
 
         // Imported history keeps the original app's document identifiers,
         // which run far above anything the primary has issued since it started

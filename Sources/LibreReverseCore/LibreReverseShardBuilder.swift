@@ -637,7 +637,7 @@ public enum LibreReverseShardBuilder {
         "event", "summary", "librereverse_summary_retry",
         "archive_destination", "archive_policy",
         "archive_object", "archive_transfer", "media_residency", "archive_library",
-        "archive_credential",
+        "archive_credential", "ask_chat",
         "capture_journal", "archive_download_request", "document_id_sequence",
     ]
 

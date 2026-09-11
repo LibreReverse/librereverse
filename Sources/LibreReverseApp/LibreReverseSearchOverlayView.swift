@@ -79,6 +79,8 @@ final class LibreReverseSearchOverlayView: NSView, NSSearchFieldDelegate {
     var onSubmit: ((LibreReverseSearchOverlayState) -> Void)?
     var onConfirm: ((LibreReverseSearchOverlayState) -> Void)?
     var onAsk: ((String) -> Void)?
+    var onExitAI: (() -> Void)?
+    private(set) var aiMode = false
     var onExpand: (() -> Void)?
     var onDismiss: (() -> Void)?
     var onEscape: (() -> Void)?
@@ -87,7 +89,10 @@ final class LibreReverseSearchOverlayView: NSView, NSSearchFieldDelegate {
 
     private let searchField = NSSearchField(frame: .zero)
     private let backdrop = NSVisualEffectView()
-    private let askButton = NSButton(title: "Ask AI", target: nil, action: nil)
+    private let askButton = LibreReverseSearchChipButton(title: "AI", symbolName: "sparkles")
+    private let aiTitle = NSTextField(labelWithString: "Ask about your history")
+    private let aiDetail = NSTextField(labelWithString: "Ask about this moment, then follow up")
+    private let filterRow = NSStackView()
     private let searchIcon = NSImageView(frame: .zero)
     /// Sized against the field's 24pt text rather than the cell's metrics.
     private static let searchIconPointSize: CGFloat = 16
@@ -151,6 +156,7 @@ final class LibreReverseSearchOverlayView: NSView, NSSearchFieldDelegate {
     }
 
     func focusSearchField(selectAll: Bool = false) {
+        guard !aiMode else { return }
         guard let window else {
             focusWhenAttached = true
             return
@@ -168,7 +174,7 @@ final class LibreReverseSearchOverlayView: NSView, NSSearchFieldDelegate {
     }
 
     func setResultsPresented(_ presented: Bool) {
-        widthConstraint.constant = Self.preferredSize.width
+        widthConstraint.constant = aiMode ? 620 : Self.preferredSize.width
         layer?.maskedCorners = presented
             ? [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
             : [
@@ -176,7 +182,7 @@ final class LibreReverseSearchOverlayView: NSView, NSSearchFieldDelegate {
                 .layerMinXMaxYCorner, .layerMaxXMaxYCorner,
             ]
         backdrop.layer?.maskedCorners = layer?.maskedCorners ?? []
-        askButton.isHidden = presented
+        askButton.isHidden = false
         invalidateIntrinsicContentSize()
     }
 
@@ -303,13 +309,22 @@ final class LibreReverseSearchOverlayView: NSView, NSSearchFieldDelegate {
         askButton.font = .systemFont(ofSize: 12)
         askButton.contentTintColor = .secondaryLabelColor
         askButton.setAccessibilityLabel("Ask AI about your history")
-        let searchRow = NSStackView(views: [searchIcon, searchField, askButton, expandButton])
+        askButton.setButtonType(.pushOnPushOff)
+        askButton.setAccessibilityIdentifier("search.ai-toggle")
+        aiTitle.font = .systemFont(ofSize: 16, weight: .medium)
+        aiTitle.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        askButton.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        aiTitle.isHidden = true
+        aiDetail.font = .systemFont(ofSize: 12)
+        aiDetail.textColor = .secondaryLabelColor
+        aiDetail.isHidden = true
+        aiDetail.translatesAutoresizingMaskIntoConstraints = false
+        let searchRow = NSStackView(views: [searchIcon, searchField, aiTitle, askButton, expandButton])
         searchRow.translatesAutoresizingMaskIntoConstraints = false
         searchRow.orientation = .horizontal
         searchRow.alignment = .centerY
         searchRow.spacing = 9
 
-        let filterRow = NSStackView()
         filterRow.translatesAutoresizingMaskIntoConstraints = false
         filterRow.orientation = .horizontal
         filterRow.alignment = .centerY
@@ -345,6 +360,7 @@ final class LibreReverseSearchOverlayView: NSView, NSSearchFieldDelegate {
 
         addSubview(searchRow)
         addSubview(filterRow)
+        addSubview(aiDetail)
 
         widthConstraint = widthAnchor.constraint(equalToConstant: Self.preferredSize.width)
         NSLayoutConstraint.activate([
@@ -359,6 +375,9 @@ final class LibreReverseSearchOverlayView: NSView, NSSearchFieldDelegate {
             expandButton.widthAnchor.constraint(equalToConstant: 30),
             expandButton.heightAnchor.constraint(equalToConstant: 28),
 
+            aiDetail.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            aiDetail.topAnchor.constraint(equalTo: searchRow.bottomAnchor, constant: 8),
+            aiDetail.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -18),
             filterRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
             filterRow.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -22),
             filterRow.topAnchor.constraint(equalTo: searchRow.bottomAnchor, constant: 8),
@@ -423,7 +442,28 @@ final class LibreReverseSearchOverlayView: NSView, NSSearchFieldDelegate {
         return true
     }
 
-    @objc private func askQuestion() { onAsk?(state.query) }
+    func setAIMode(_ enabled: Bool) {
+        guard enabled != aiMode else { return }
+        aiMode = enabled
+        querySubmissionTask?.cancel()
+        querySubmissionTask = nil
+        askButton.state = enabled ? .on : .off
+        askButton.isSelected = enabled
+        askButton.contentTintColor = enabled ? .systemBlue : .secondaryLabelColor
+        askButton.setAccessibilityLabel(enabled ? "AI search enabled; switch to keyword search" : "Enable AI search")
+        searchField.isHidden = enabled
+        searchIcon.isHidden = enabled
+        expandButton.isHidden = enabled
+        filterRow.isHidden = enabled
+        aiTitle.isHidden = !enabled
+        aiDetail.isHidden = !enabled
+        widthConstraint.constant = enabled ? 620 : Self.preferredSize.width
+    }
+
+    @objc private func askQuestion() {
+        setAIMode(!aiMode)
+        if aiMode { onAsk?(state.query) } else { onExitAI?() }
+    }
 
     @objc private func hideSearch() { onDismiss?() }
 

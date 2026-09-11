@@ -20,6 +20,7 @@ for detailed visual and interaction coverage.
 - Browse meeting waveforms and synchronized transcripts; move or pin the reader.
 - Edit meeting details and participants, copy or export transcripts, and delete meetings.
 - Browse Daily Recap and meeting details; summarize or ask questions using an AI profile.
+- Continue Ask with follow-up questions in a chat, inspect each answer’s sources, and track or cancel requests. Configure profiles and keys in Settings → AI.
 - Associate meetings with selected calendars when Calendar access is granted.
 
 ## Settings

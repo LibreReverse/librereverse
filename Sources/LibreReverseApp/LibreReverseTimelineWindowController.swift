@@ -69,7 +69,7 @@ private final class LibreReverseTimelineWindow: NSWindow {
         }
         // Text editing owns character input and caret navigation. In particular,
         // a space in a query must never toggle the timeline playback timer.
-        if event.type == .keyDown, let editor = firstResponder as? NSTextView, editor.isEditable {
+        if event.type == .keyDown, let editor = firstResponder as? NSTextView, editor.isSelectable {
             if handleEditingCommand(event, editor: editor) { return }
             super.sendEvent(event)
             return
@@ -134,8 +134,8 @@ private final class LibreReverseTimelineWindow: NSWindow {
         switch character {
         case "a": editor.selectAll(nil)
         case "c": editor.copy(nil)
-        case "x": editor.cut(nil)
-        case "v": editor.paste(nil)
+        case "x": if editor.isEditable { editor.cut(nil) }
+        case "v": if editor.isEditable { editor.paste(nil) }
         case "z":
             if flags.contains(.shift) {
                 if editor.undoManager?.canRedo == true { editor.undoManager?.redo() }
@@ -469,6 +469,11 @@ final class LibreReverseTimelineWindowController: NSWindowController,
     var onAskQuestion: ((String) -> Void)?
     private let searchOverlay = LibreReverseSearchOverlayView()
     private let searchResultsView = LibreReverseSearchResultsView()
+    private let inlineAskContainer = NSView()
+    private weak var inlineAskController: LibreReverseAskWindowController?
+    private var inlineAskTopConstraint: NSLayoutConstraint!
+    private var inlineAskPresented = false
+    private var inlineAskLayoutConstraints: [NSLayoutConstraint] = []
     private let collapsedSearchButton = NSButton(title: "Search", target: nil, action: nil)
     private var explorerSearch = ExplorerSearchState()
     private var searchTask: Task<Void, Never>?
@@ -697,7 +702,7 @@ final class LibreReverseTimelineWindowController: NSWindowController,
         window.shouldScrollTimeline = { [weak self] event in
             guard let self, let content = self.window?.contentView else { return true }
             let point = content.convert(event.locationInWindow, from: nil)
-            for view in [self.searchOverlay, self.searchResultsView, self.meetingTranscriptView] {
+            for view in [self.searchOverlay, self.searchResultsView, self.meetingTranscriptView, self.inlineAskContainer] {
                 if !view.isHidden, view.convert(view.bounds, to: content).contains(point) { return false }
             }
             return true
@@ -3725,6 +3730,14 @@ final class LibreReverseTimelineWindowController: NSWindowController,
 
     var interactionTestPresentationInterval: DateInterval? { playbackTimelinePresentation?.interval }
 
+    func interactionTestShouldScrollTimeline(at point: NSPoint) -> Bool {
+        guard let window = window as? LibreReverseTimelineWindow,
+              let event = NSEvent.mouseEvent(with: .mouseMoved, location: point,
+                modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                eventNumber: 0, clickCount: 0, pressure: 0) else { return true }
+        return window.shouldScrollTimeline?(event) ?? true
+    }
+
     func interactionTestScrollBeyondEdge(at date: Date, unavailable: HistoricalUnavailableShard) async -> Int64? {
         unavailableShards = [unavailable]
         pendingVisualScroll = -1
@@ -4868,6 +4881,12 @@ final class LibreReverseTimelineWindowController: NSWindowController,
             self?.presentTimelineActionsMenu()
         }
         searchOverlay.onAsk = { [weak self] query in self?.onAskQuestion?(query) }
+        searchOverlay.onExitAI = { [weak self] in
+            guard let self else { return }
+            self.inlineAskPresented = false
+            self.resetExplorerSearch(.open)
+            self.searchOverlay.focusSearchField()
+        }
         searchOverlay.onDismiss = { [weak self] in self?.resetExplorerSearch(.hide) }
         searchOverlay.onEscape = { [weak self] in self?.resetExplorerSearch(.hide) }
         searchOverlay.onStateChange = { [weak self] state in
@@ -4881,7 +4900,8 @@ final class LibreReverseTimelineWindowController: NSWindowController,
             self.renderExplorerSearch()
         }
         searchOverlay.onSubmit = { [weak self] state in
-            self?.submitSearch(state)
+            guard let self, !self.inlineAskPresented else { return }
+            self.submitSearch(state)
         }
         searchOverlay.onConfirm = { [weak self] state in
             guard let self else { return }
@@ -4950,6 +4970,21 @@ final class LibreReverseTimelineWindowController: NSWindowController,
       content.addSubview(meetingTranscriptView)
         content.addSubview(searchOverlay)
         content.addSubview(searchResultsView)
+        inlineAskContainer.translatesAutoresizingMaskIntoConstraints = false
+        inlineAskContainer.wantsLayer = true
+        inlineAskContainer.layer?.backgroundColor = NSColor(calibratedWhite: 0.105, alpha: 1).cgColor
+        inlineAskContainer.layer?.cornerRadius = 14
+        inlineAskContainer.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        inlineAskContainer.layer?.masksToBounds = true
+        inlineAskContainer.isHidden = true
+        content.addSubview(inlineAskContainer)
+        inlineAskTopConstraint = searchOverlay.topAnchor.constraint(equalTo: content.topAnchor, constant: 28)
+        inlineAskLayoutConstraints = [
+            inlineAskContainer.topAnchor.constraint(equalTo: searchOverlay.bottomAnchor),
+            inlineAskContainer.leadingAnchor.constraint(equalTo: searchOverlay.leadingAnchor),
+            inlineAskContainer.widthAnchor.constraint(equalTo: searchOverlay.widthAnchor),
+            inlineAskContainer.bottomAnchor.constraint(equalTo: timelineOverlay.topAnchor, constant: -22),
+        ]
         content.addSubview(collapsedSearchButton)
         content.addSubview(dateLabel)
         searchResultsView.isHidden = true
@@ -5103,6 +5138,7 @@ final class LibreReverseTimelineWindowController: NSWindowController,
         searchCountsTask = nil
         searchOverlay.cancelPendingSubmission()
         explorerSearch.send(action)
+        inlineAskPresented = false
         searchOverlay.setState(explorerSearch.input)
         activeSearchState = nil
         displayedSearchState = nil
@@ -5114,15 +5150,51 @@ final class LibreReverseTimelineWindowController: NSWindowController,
         renderExplorerSearch()
     }
 
+    func presentInlineAsk(_ controller: LibreReverseAskWindowController, query: String = "") {
+        searchTask?.cancel()
+        searchCountsTask?.cancel()
+        searchTask = nil
+        explorerSearch.send(.open)
+        inlineAskController = controller
+        let embedded = controller.takeContentForEmbedding()
+        if embedded.superview !== inlineAskContainer {
+            inlineAskContainer.subviews.forEach { $0.removeFromSuperview() }
+            embedded.translatesAutoresizingMaskIntoConstraints = false
+            inlineAskContainer.addSubview(embedded)
+            NSLayoutConstraint.activate([
+                embedded.leadingAnchor.constraint(equalTo: inlineAskContainer.leadingAnchor),
+                embedded.trailingAnchor.constraint(equalTo: inlineAskContainer.trailingAnchor),
+                embedded.topAnchor.constraint(equalTo: inlineAskContainer.topAnchor),
+                embedded.bottomAnchor.constraint(equalTo: inlineAskContainer.bottomAnchor)
+            ])
+        }
+        inlineAskPresented = true
+        searchOverlay.setAIMode(true)
+        renderExplorerSearch()
+        controller.prepareEmbedded(query: query, contextMoment: currentSeekDate ?? Date())
+    }
+
     private func renderExplorerSearch() {
         let expanded = explorerSearch.expanded
-        let results = expanded && explorerSearch.resultsPresented
+        let ai = expanded && inlineAskPresented
+        let results = expanded && explorerSearch.resultsPresented && !ai
+        let wasAIVisible = !inlineAskContainer.isHidden
+        inlineAskContainer.isHidden = !ai
+        if wasAIVisible != ai { inlineAskController?.setEmbeddedVisible(ai) }
+        if !ai, let responder = window?.firstResponder as? NSView,
+           responder.isDescendant(of: inlineAskContainer) {
+            window?.makeFirstResponder(liveTextOverlay)
+        }
+        if ai { NSLayoutConstraint.activate(inlineAskLayoutConstraints) }
+        else { NSLayoutConstraint.deactivate(inlineAskLayoutConstraints) }
+        searchOverlay.setAIMode(ai)
         searchOverlay.isHidden = !expanded
         collapsedSearchButton.isHidden = true
-        searchOverlay.setResultsPresented(results)
+        searchOverlay.setResultsPresented(results || ai)
         searchResultsView.isHidden = !results
-        searchOverlayCenterConstraint.isActive = !results
+        searchOverlayCenterConstraint.isActive = !results && !ai
         searchCompositionCenterConstraint.isActive = results
+        inlineAskTopConstraint.isActive = ai
         if !expanded, searchOverlay.ownsFirstResponder(window?.firstResponder) {
             window?.makeFirstResponder(liveTextOverlay)
         }

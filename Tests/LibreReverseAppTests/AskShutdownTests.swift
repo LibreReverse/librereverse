@@ -31,7 +31,7 @@ final class AskShutdownTests: XCTestCase {
         let controller = LibreReverseAskWindowController(
             answerHandler: { question, _ in
                 await answers.answer(question, started: question == "first" ? firstStarted : secondStarted)
-            }, loadAPIKey: { "test-key" }, saveAPIKey: { _ in }, openMoment: { _ in })
+            }, loadAPIKey: { "test-key" }, openAISettings: { }, openMoment: { _ in })
         let first = try XCTUnwrap(controller.requestAnswer(question: "first"))
         await fulfillment(of: [firstStarted], timeout: 2)
         controller.close()

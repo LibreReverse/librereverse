@@ -513,16 +513,22 @@ private final class LibreReverseAppDelegate: NSObject, NSApplicationDelegate, NS
         askFixtureAPIKey = fixture == "setup" ? nil : "fixture-key"
         askWindow = LibreReverseAskWindowController(
           answerHandler: { _, _ in
+            if fixture == "chat" {
+              try await Task.sleep(for: .seconds(2))
+              return .init(text: "The follow-up was to test **screen sharing** before Friday. [1]", citations: [
+                .init(instant: Date(timeIntervalSince1970: 1_777_124_400), title: "Weekly product review",
+                      excerpt: "Test screen sharing before Friday.", source: "Transcript")])
+            }
             if fixture == "loading" { try await Task.sleep(for: .seconds(60)) }
             throw NSError(domain: "LibreReverse.UIFixture", code: 1,
               userInfo: [NSLocalizedDescriptionKey: "The AI profile could not be reached. Try again."])
           },
           loadAPIKey: { [weak self] in self?.askFixtureAPIKey },
-          saveAPIKey: { [weak self] value in self?.askFixtureAPIKey = value },
+          openAISettings: { },
           openMoment: { _ in }
         )
         askWindow?.present()
-        if fixture == "answer" {
+        if fixture == "answer" || fixture == "chat" {
           let instant = Date(timeIntervalSince1970: 1_777_124_400)
           askWindow?.presentFixture(
             question: "What were the main decisions from the product review?",
@@ -544,6 +550,12 @@ private final class LibreReverseAppDelegate: NSObject, NSApplicationDelegate, NS
               ]
             )
           )
+        }
+        if fixture == "chat" {
+          askWindow?.appendFixture(question: "Who owns the follow-up work?", answer: .init(
+            text: "**Alex** will test screen sharing, and **Morgan** will review transcription accuracy. [1]\n\nThe rollout stays limited until both checks pass.",
+            citations: [.init(instant: Date(timeIntervalSince1970: 1_777_124_400),
+              title: "Weekly product review", excerpt: "Alex: screen sharing. Morgan: transcription accuracy.", source: "Transcript")]))
         }
         if fixture == "loading" || fixture == "error" {
           askWindow?.prefill(question: "What did we decide in the product review?")
@@ -3721,30 +3733,43 @@ private final class LibreReverseAppDelegate: NSObject, NSApplicationDelegate, NS
     }
 
     @objc private func openAsk() {
-      timelineWindow?.dismiss()
+      openTimelineWithSource(.lastSearch)
+      ensureAskController()
+      if let askWindow { timelineWindow?.presentInlineAsk(askWindow) }
+    }
+
+    private func ensureAskController() {
       if askWindow == nil {
         let configuration = libraryConfiguration
+        let queue = meetingTranscriptionQueue
         askWindow = LibreReverseAskWindowController(
           answerHandler: { question, apiKey in
             let profile = LibreReverseAIProfiles.selected()
             let provider = LibreReverseAIService.provider(for: profile)
             let selectedKey = try LibreReverseAIService.credential(for: profile, configuration: configuration)
-            return try await LibreReverseAskEngine(configuration: configuration, provider: provider)
+            return try await LibreReverseAskEngine(configuration: configuration, provider: provider, transcriptionQueue: queue)
               .answer(question: question, apiKey: selectedKey)
           },
           loadAPIKey: {
             try LibreReverseAskCredentialStore.load(configuration: configuration)
           },
-          saveAPIKey: { value in
-            try LibreReverseAskCredentialStore.save(value, configuration: configuration)
+          openAISettings: { [weak self] in
+            self?.presentSettings(section: .ai)
           },
           openMoment: { [weak self] instant in
             self?.openTimelineWithSource(.lastSearch)
             self?.timelineWindow?.navigateToMoment(instant)
-          }
+          },
+          conversationAnswerHandler: { question, _, conversation, viewingInstant, onProgress in
+            let profile = LibreReverseAIProfiles.selected()
+            let provider = LibreReverseAIService.provider(for: profile)
+            let selectedKey = try LibreReverseAIService.credential(for: profile, configuration: configuration)
+            return try await LibreReverseAskEngine(configuration: configuration, provider: provider, transcriptionQueue: queue)
+              .answer(question: question, conversation: conversation, apiKey: selectedKey, viewingInstant: viewingInstant, onProgress: onProgress)
+          },
+          chatStore: LibreReverseAskChatStore(configuration: configuration)
         )
       }
-      askWindow?.present()
     }
 
     @objc private func openQuickStart() {
@@ -3987,8 +4012,9 @@ private final class LibreReverseAppDelegate: NSObject, NSApplicationDelegate, NS
             return
         }
         timelineWindow?.onAskQuestion = { [weak self] question in
-            self?.openAsk()
-            self?.askWindow?.prefill(question: question)
+            guard let self else { return }
+            self.ensureAskController()
+            if let askWindow = self.askWindow { self.timelineWindow?.presentInlineAsk(askWindow, query: question) }
         }
         timelineWindow?.present(
             on: mainScreen,
